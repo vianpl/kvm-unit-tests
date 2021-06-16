@@ -213,5 +213,62 @@ struct hv_reference_tsc_page {
         int64_t tsc_offset;
 };
 
+/* hypercall status code */
+#define HV_STATUS_SUCCESS                       0
+#define HV_STATUS_INVALID_HYPERCALL_CODE        2
+#define HV_STATUS_INVALID_HYPERCALL_INPUT       3
+#define HV_STATUS_INVALID_ALIGNMENT             4
+#define HV_STATUS_INVALID_PARAMETER             5
+#define HV_STATUS_ACCESS_DENIED                 6
+#define HV_STATUS_INSUFFICIENT_MEMORY           11
+#define HV_STATUS_INVALID_PARTITION_ID          13
+#define HV_STATUS_INVALID_VP_INDEX              14
+#define HV_STATUS_INVALID_PORT_ID               17
+#define HV_STATUS_INVALID_CONNECTION_ID         18
+#define HV_STATUS_INSUFFICIENT_BUFFERS          19
+
+typedef unsigned __attribute__((vector_size(16))) sse128;
+
+typedef union {
+    sse128 sse;
+    uint32_t l[4];
+    uint64_t q[2];
+} sse_reg;
+
+struct hyperv_hypercall_thunk
+{
+    /* Hypercall code */
+    uint16_t code;
+
+    /* Result on return */
+    uint64_t result;
+
+    /* Continuation info */
+    uint16_t rep_idx;
+    uint16_t rep_cnt;
+
+    /* Use fast calling convention */
+    bool fast;
+
+    /* Arguments (XMM part valid only if fast convention is used) */
+    uint64_t arg1;
+    uint64_t arg2;
+    sse_reg xmm[6];
+};
+
+/**
+ * Setup hyperv hypercall machinery
+ */
+void *hyperv_setup_hypercall(void);
+
+/**
+ * Free hyperv hypercall resources
+ */
+void hyperv_teardown_hypercall(void *hypercall_page);
+
+/**
+ * Execute a hyperv hypercall described by thunk instance
+ */
+void hyperv_hypercall(void *hypercall_page, struct hyperv_hypercall_thunk *hc);
 
 #endif

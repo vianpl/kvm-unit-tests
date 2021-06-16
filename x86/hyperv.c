@@ -1,6 +1,7 @@
 #include "hyperv.h"
 #include "asm/io.h"
 #include "smp.h"
+#include "alloc_page.h"
 
 enum {
     HV_TEST_DEV_SINT_ROUTE_CREATE = 1,
@@ -67,4 +68,59 @@ void evt_conn_destroy(u8 sint, u8 conn_id)
 {
     sint_disable(sint);
     synic_ctl(HV_TEST_DEV_EVT_CONN_DESTROY, 0, 0, conn_id);
+}
+
+void *hyperv_setup_hypercall(void)
+{
+    u64 guestid = (0x8f00ull << 48);
+
+    void *hypercall_page = alloc_page();
+    if (!hypercall_page)
+        report_abort("failed to allocate hypercall page");
+
+    wrmsr(HV_X64_MSR_GUEST_OS_ID, guestid);
+
+    wrmsr(HV_X64_MSR_HYPERCALL,
+          (u64)virt_to_phys(hypercall_page) | HV_X64_MSR_HYPERCALL_ENABLE);
+
+    return hypercall_page;
+}
+
+void hyperv_teardown_hypercall(void* hypercall_page)
+{
+    wrmsr(HV_X64_MSR_HYPERCALL, 0);
+    wrmsr(HV_X64_MSR_GUEST_OS_ID, 0);
+    free_page(hypercall_page);
+}
+
+/* Call hyperv hypercall */
+void hyperv_hypercall(void *hypercall_page, struct hyperv_hypercall_thunk *hc)
+{
+    uint64_t ctl = (uint64_t)hc->code |
+                   (uint64_t)hc->fast << 16 |
+                   (uint64_t)hc->rep_cnt << 32 |
+                   (uint64_t)hc->rep_idx << 48;
+
+    uint64_t result;
+
+#ifdef __x86_64__
+    register uint64_t r8 __asm__("r8") = hc->arg2; /* No gcc constraint for r8, so local register spec */
+    asm volatile (
+            "call   *%[hcall_page] \n"
+            :"=a"(result)
+            :"c"(ctl), "d"(hc->arg1), "r"(r8), [hcall_page] "m" (hypercall_page)
+            :"memory");
+#else
+    asm volatile (
+            "call   *%[hcall_page] \n"
+            :"=A"(result)
+            :"A"(ctl),
+            "c"((uint32_t)(hc->arg1 & 0xFFFFFFFF)), "b"((uint32_t)(hc->arg1 >> 32)),
+            "S"((uint32_t)(hc->arg2 & 0xFFFFFFFF)), "D"((uint32_t)(hc->arg2 >> 32)),
+            [hcall_page] "m" (hypercall_page)
+            :"memory");
+#endif
+
+    hc->result = result & 0xFFFFFFFF;
+    hc->rep_idx += (result >> 32) & 0xFFF;
 }

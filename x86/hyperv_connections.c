@@ -32,60 +32,22 @@ struct hv_vcpu {
 };
 
 static struct hv_vcpu hv_vcpus[MAX_CPUS];
+static void *hypercall_page;
 
 static void sint_isr(isr_regs_t *regs)
 {
 	atomic_inc(&hv_vcpus[smp_id()].sint_received);
 }
 
-static void *hypercall_page;
-
-static void setup_hypercall(void)
-{
-	u64 guestid = (0x8f00ull << 48);
-
-	hypercall_page = alloc_page();
-	if (!hypercall_page)
-		report_abort("failed to allocate hypercall page");
-
-	wrmsr(HV_X64_MSR_GUEST_OS_ID, guestid);
-
-	wrmsr(HV_X64_MSR_HYPERCALL,
-	      (u64)virt_to_phys(hypercall_page) | HV_X64_MSR_HYPERCALL_ENABLE);
-}
-
-static void teardown_hypercall(void)
-{
-	wrmsr(HV_X64_MSR_HYPERCALL, 0);
-	wrmsr(HV_X64_MSR_GUEST_OS_ID, 0);
-	free_page(hypercall_page);
-}
-
 static u64 do_hypercall(u16 code, u64 arg, bool fast)
 {
-	u64 ret;
-	u64 ctl = code;
-	if (fast)
-		ctl |= HV_HYPERCALL_FAST;
+    struct hyperv_hypercall_thunk hc = {0};
+    hc.code = code;
+    hc.fast = fast;
+    hc.arg1 = arg;
 
-	asm volatile ("call *%[hcall_page]"
-#ifdef __x86_64__
-		      "\n mov $0,%%r8"
-		      : "=a"(ret)
-		      : "c"(ctl), "d"(arg),
-#else
-		      : "=A"(ret)
-		      : "A"(ctl),
-			"b" ((u32)(arg >> 32)), "c" ((u32)arg),
-			"D"(0), "S"(0),
-#endif
-		      [hcall_page] "m" (hypercall_page)
-#ifdef __x86_64__
-		      : "r8"
-#endif
-		     );
-
-	return ret;
+    hyperv_hypercall(hypercall_page, &hc);
+    return hc.result;
 }
 
 static void setup_cpu(void *ctx)
@@ -147,8 +109,7 @@ static void do_msg(void *ctx)
 
 	msg->payload[0]++;
 	atomic_set(&hv->sint_received, 0);
-	hv->hvcall_status = do_hypercall(HVCALL_POST_MESSAGE,
-					 virt_to_phys(msg), 0);
+	hv->hvcall_status = do_hypercall(HVCALL_POST_MESSAGE, virt_to_phys(msg), false);
 	atomic_inc(&ncpus_done);
 }
 
@@ -200,8 +161,7 @@ static void do_evt(void *ctx)
 	struct hv_vcpu *hv = &hv_vcpus[vcpu];
 
 	atomic_set(&hv->sint_received, 0);
-	hv->hvcall_status = do_hypercall(HVCALL_SIGNAL_EVENT,
-					 hv->evt_conn, 1);
+	hv->hvcall_status = do_hypercall(HVCALL_SIGNAL_EVENT, hv->evt_conn, true);
 	atomic_inc(&ncpus_done);
 }
 
@@ -260,8 +220,6 @@ static int run_test(int ncpus, int dst_add, ulong wait_cycles,
 	return ret;
 }
 
-#define HV_STATUS_INVALID_HYPERCALL_CODE        2
-
 int main(int ac, char **av)
 {
 	int ncpus, ncpus_ok, i;
@@ -279,9 +237,9 @@ int main(int ac, char **av)
 	handle_irq(MSG_VEC, sint_isr);
 	handle_irq(EVT_VEC, sint_isr);
 
-	setup_hypercall();
+	hypercall_page = hyperv_setup_hypercall();
 
-	if (do_hypercall(HVCALL_SIGNAL_EVENT, 0x1234, 1) ==
+	if (do_hypercall(HVCALL_SIGNAL_EVENT, 0x1234, true) ==
 	    HV_STATUS_INVALID_HYPERCALL_CODE) {
 		report_skip("Hyper-V SynIC connections are not supported");
 		goto summary;
@@ -325,7 +283,7 @@ int main(int ac, char **av)
 	for (i = 0; i < ncpus; i++)
 		on_cpu(i, teardown_cpu, NULL);
 
-	teardown_hypercall();
+	hyperv_teardown_hypercall(hypercall_page);
 
 summary:
 	return report_summary();
