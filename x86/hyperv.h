@@ -189,6 +189,8 @@ struct hv_event_flags_page {
 
 #define HV_HYPERCALL_FAST               (1u << 16)
 
+#define HVCALL_GET_VP_REGISTERS                 0x50
+#define HVCALL_SET_VP_REGISTERS                 0x51
 #define HVCALL_POST_MESSAGE                     0x5c
 #define HVCALL_SIGNAL_EVENT                     0x5d
 
@@ -327,5 +329,38 @@ union hv_input_vtl {
 
 #define HV_INPUT_VTL(num)       ((union hv_input_vtl) { .target_vtl = (num) & 0xf, .use_target_vtl = 1 })
 #define HV_NO_INPUT_VTL         ((union hv_input_vtl) { .as_u8 = 0 })
+
+struct hv_vp_register_val {
+    uint64_t low;
+    uint64_t high;
+};
+
+#define HV_X64_REGISTER_RSP            0x00020004
+#define HV_X64_REGISTER_RIP            0x00020010
+#define HV_X64_REGISTER_RFLAGS         0x00020011
+#define HV_X64_REGISTER_CR0            0x00040000
+#define HV_X64_REGISTER_CR3            0x00040002
+#define HV_X64_REGISTER_CR4            0x00040003
+#define HV_X64_REGISTER_CR8            0x00040004
+#define HV_X64_REGISTER_DR7            0x00050005
+#define HV_X64_REGISTER_IDTR           0x00070000
+#define HV_X64_REGISTER_GDTR           0x00070001
+#define HV_X64_REGISTER_EFER           0x00080001
+#define HV_X64_REGISTER_APIC_BASE      0x00080003
+#define HV_X64_REGISTER_SYSENTER_CS    0x00080005
+#define HV_X64_REGISTER_SYSENTER_EIP   0x00080006
+#define HV_X64_REGISTER_SYSENTER_ESP   0x00080007
+#define HV_X64_REGISTER_STAR           0x00080008
+#define HV_X64_REGISTER_LSTAR          0x00080009
+#define HV_X64_REGISTER_CSTAR          0x0008000A
+#define HV_X64_REGISTER_SFMASK         0x0008000B
+#define HV_X64_REGISTER_TSC_AUX        0x0008007B
+
+struct hv_get_set_vp_registers {
+        uint64_t partition_id;
+        uint32_t vp_index;
+        union hv_input_vtl input_vtl;
+        uint8_t padding[3];
+} __attribute__((packed));
 
 #endif

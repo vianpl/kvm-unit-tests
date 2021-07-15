@@ -87,4 +87,15 @@ static inline unsigned int get_order(size_t size)
 	return size ? fls(size) + !is_power_of_2(size) : 0;
 }
 
+/*
+ * Align _val up to _bsize, which should be a power of 2
+ */
+#define ALIGN_UP(_val, _bsize) \
+    (((_val) + (_bsize) - 1) & ~((_bsize) - 1))
+
+static inline void *align_ptr_up(void *p, size_t bsize)
+{
+    return (void*) ALIGN_UP((size_t)p, bsize);
+}
+
 #endif
