@@ -20,9 +20,18 @@
 
 #define HV_X64_MSR_GUEST_OS_ID                  0x40000000
 #define HV_X64_MSR_HYPERCALL                    0x40000001
+#define HV_X64_MSR_VP_INDEX                     0x40000002
 
 #define HV_X64_MSR_TIME_REF_COUNT               0x40000020
 #define HV_X64_MSR_REFERENCE_TSC                0x40000021
+#define HV_X64_MSR_VP_ASSIST_PAGE               0x40000073
+
+/* Define virtual processor assist page structure. */
+struct hv_vp_assist_page {
+        uint32_t apic_assist;
+        uint32_t reserved1;
+        /* There is more data below which we don't care about yet */
+} __attribute__((packed));
 
 /* Define synthetic interrupt controller model specific registers. */
 #define HV_X64_MSR_SCONTROL                     0x40000080
@@ -235,6 +244,9 @@ struct hv_reference_tsc_page {
 #define HV_STATUS_INVALID_CONNECTION_ID         18
 #define HV_STATUS_INSUFFICIENT_BUFFERS          19
 
+#define HV_PARTITION_ID_SELF                    ((u64)-1)
+#define HV_VP_INDEX_SELF                        ((u32)-2)
+
 typedef unsigned __attribute__((vector_size(16))) sse128;
 
 typedef union {
@@ -299,5 +311,21 @@ void hyperv_teardown_hypercall(void *hypercall_page);
  * Execute a hyperv hypercall described by thunk instance
  */
 void hyperv_hypercall(void *hypercall_page, struct hyperv_hypercall_thunk *hc);
+
+#define HV_NUM_VTLS             2
+#define HV_INVALID_VTL          ((u8) -1)
+#define HV_ALL_VTLS             ((u8) 0xF)
+
+union hv_input_vtl {
+    uint8_t as_u8;
+    struct {
+        u8 target_vtl:4;
+        u8 use_target_vtl:1;
+        u8 reservedz:3;
+    };
+};
+
+#define HV_INPUT_VTL(num)       ((union hv_input_vtl) { .target_vtl = (num) & 0xf, .use_target_vtl = 1 })
+#define HV_NO_INPUT_VTL         ((union hv_input_vtl) { .as_u8 = 0 })
 
 #endif
