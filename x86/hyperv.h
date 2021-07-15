@@ -10,6 +10,10 @@
 #define HV_X64_MSR_SYNIC_AVAILABLE              (1 << 2)
 #define HV_X64_MSR_SYNTIMER_AVAILABLE           (1 << 3)
 
+/* HYPERV_CPUID_FEATURES.EBX */
+#define HV_X64_ACCESS_VSM                       (1 << 16)
+#define HV_X64_ACCESS_VP_REGISTERS              (1 << 17)
+
 /* HYPERV_CPUID_FEATURES.EDX */
 #define HV_X64_HYPERCALL_XMM_INPUT_AVAILABLE    (1 << 4)
 #define HV_X64_HYPERCALL_XMM_OUTPUT_AVAILABLE   (1 << 15)
@@ -273,6 +277,12 @@ static inline bool hv_xmm_hypercall_input_supported(void)
 static inline bool hv_xmm_hypercall_output_supported(void)
 {
         return cpuid(HYPERV_CPUID_FEATURES).d & HV_X64_HYPERCALL_XMM_OUTPUT_AVAILABLE;
+}
+
+static inline bool hv_vsm_supported(void)
+{
+    uint32_t vsm_mask = HV_X64_ACCESS_VSM | HV_X64_ACCESS_VP_REGISTERS;
+    return (cpuid(HYPERV_CPUID_FEATURES).b & vsm_mask) == vsm_mask;
 }
 
 /**

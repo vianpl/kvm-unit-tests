@@ -86,6 +86,7 @@ tests-common = $(TEST_DIR)/vmexit.$(exe) $(TEST_DIR)/tsc.$(exe) \
                $(TEST_DIR)/init.$(exe) \
                $(TEST_DIR)/hyperv_synic.$(exe) $(TEST_DIR)/hyperv_stimer.$(exe) \
                $(TEST_DIR)/hyperv_connections.$(exe) \
+               $(TEST_DIR)/hyperv_vsm.flat \
                $(TEST_DIR)/tsx-ctrl.$(exe) \
                $(TEST_DIR)/emulator.$(exe) \
                $(TEST_DIR)/eventinj.$(exe) \
@@ -122,6 +123,8 @@ $(TEST_DIR)/hyperv_synic.$(bin): $(TEST_DIR)/hyperv.o
 $(TEST_DIR)/hyperv_stimer.$(bin): $(TEST_DIR)/hyperv.o
 
 $(TEST_DIR)/hyperv_connections.$(bin): $(TEST_DIR)/hyperv.o
+
+$(TEST_DIR)/hyperv_vsm.elf: $(TEST_DIR)/hyperv.o
 
 arch_clean:
 	$(RM) $(TEST_DIR)/*.o $(TEST_DIR)/*.flat $(TEST_DIR)/*.elf \
