@@ -70,7 +70,9 @@ void evt_conn_destroy(u8 sint, u8 conn_id)
     synic_ctl(HV_TEST_DEV_EVT_CONN_DESTROY, 0, 0, conn_id);
 }
 
-void *hyperv_setup_hypercall(void)
+static bool g_fast_xmm_calls_enabled;
+
+void *hyperv_setup_hypercall(enum hyperv_hypercall_flags flags)
 {
     u64 guestid = (0x8f00ull << 48);
 
@@ -83,6 +85,7 @@ void *hyperv_setup_hypercall(void)
     wrmsr(HV_X64_MSR_HYPERCALL,
           (u64)virt_to_phys(hypercall_page) | HV_X64_MSR_HYPERCALL_ENABLE);
 
+    g_fast_xmm_calls_enabled = flags & HYPERV_ENABLE_FAST_XMM_CALLS;
     return hypercall_page;
 }
 
@@ -103,6 +106,23 @@ void hyperv_hypercall(void *hypercall_page, struct hyperv_hypercall_thunk *hc)
 
     uint64_t result;
 
+    /*
+     * Note about XMM usage:
+     *
+     * Overall kvm unit tests build with -mno-sse -mno-sse2 for both 32 and 64 bit archs,
+     * so compiler is not generating code to use those registers, so we are safe to clobber them below as long
+     * as we're the only thing that uses them in this test.
+     */
+
+    if (hc->fast && g_fast_xmm_calls_enabled) {
+        asm volatile ("movdqu %0, %%xmm0" ::"m"(hc->xmm[0]));
+        asm volatile ("movdqu %0, %%xmm1" ::"m"(hc->xmm[1]));
+        asm volatile ("movdqu %0, %%xmm2" ::"m"(hc->xmm[2]));
+        asm volatile ("movdqu %0, %%xmm3" ::"m"(hc->xmm[3]));
+        asm volatile ("movdqu %0, %%xmm4" ::"m"(hc->xmm[4]));
+        asm volatile ("movdqu %0, %%xmm5" ::"m"(hc->xmm[5]));
+    }
+
 #ifdef __x86_64__
     register uint64_t r8 __asm__("r8") = hc->arg2; /* No gcc constraint for r8, so local register spec */
     asm volatile (
@@ -120,6 +140,15 @@ void hyperv_hypercall(void *hypercall_page, struct hyperv_hypercall_thunk *hc)
             [hcall_page] "m" (hypercall_page)
             :"memory");
 #endif
+
+    if (hc->fast && g_fast_xmm_calls_enabled) {
+        asm volatile ("movdqu %%xmm0, %0" :"=m"(hc->xmm[0])::"memory");
+        asm volatile ("movdqu %%xmm1, %0" :"=m"(hc->xmm[1])::"memory");
+        asm volatile ("movdqu %%xmm2, %0" :"=m"(hc->xmm[2])::"memory");
+        asm volatile ("movdqu %%xmm3, %0" :"=m"(hc->xmm[3])::"memory");
+        asm volatile ("movdqu %%xmm4, %0" :"=m"(hc->xmm[4])::"memory");
+        asm volatile ("movdqu %%xmm5, %0" :"=m"(hc->xmm[5])::"memory");
+    }
 
     hc->result = result & 0xFFFFFFFF;
     hc->rep_idx += (result >> 32) & 0xFFF;

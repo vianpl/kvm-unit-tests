@@ -10,6 +10,10 @@
 #define HV_X64_MSR_SYNIC_AVAILABLE              (1 << 2)
 #define HV_X64_MSR_SYNTIMER_AVAILABLE           (1 << 3)
 
+/* HYPERV_CPUID_FEATURES.EDX */
+#define HV_X64_HYPERCALL_XMM_INPUT_AVAILABLE    (1 << 4)
+#define HV_X64_HYPERCALL_XMM_OUTPUT_AVAILABLE   (1 << 15)
+
 #define HV_X64_MSR_GUEST_OS_ID                  0x40000000
 #define HV_X64_MSR_HYPERCALL                    0x40000001
 
@@ -235,6 +239,11 @@ typedef union {
     uint64_t q[2];
 } sse_reg;
 
+enum hyperv_hypercall_flags {
+        HYPERV_HYPERCALL_DEFAULT = 0,
+        HYPERV_ENABLE_FAST_XMM_CALLS = 0x01,
+};
+
 struct hyperv_hypercall_thunk
 {
     /* Hypercall code */
@@ -250,16 +259,26 @@ struct hyperv_hypercall_thunk
     /* Use fast calling convention */
     bool fast;
 
-    /* Arguments (XMM part valid only if fast convention is used) */
+    /* Arguments for fast calls (XMM needs to be enabled explicitly) */
     uint64_t arg1;
     uint64_t arg2;
     sse_reg xmm[6];
 };
 
+static inline bool hv_xmm_hypercall_input_supported(void)
+{
+        return cpuid(HYPERV_CPUID_FEATURES).d & HV_X64_HYPERCALL_XMM_INPUT_AVAILABLE;
+}
+
+static inline bool hv_xmm_hypercall_output_supported(void)
+{
+        return cpuid(HYPERV_CPUID_FEATURES).d & HV_X64_HYPERCALL_XMM_OUTPUT_AVAILABLE;
+}
+
 /**
  * Setup hyperv hypercall machinery
  */
-void *hyperv_setup_hypercall(void);
+void *hyperv_setup_hypercall(enum hyperv_hypercall_flags);
 
 /**
  * Free hyperv hypercall resources

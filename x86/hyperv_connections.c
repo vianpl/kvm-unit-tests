@@ -237,7 +237,7 @@ int main(int ac, char **av)
 	handle_irq(MSG_VEC, sint_isr);
 	handle_irq(EVT_VEC, sint_isr);
 
-	hypercall_page = hyperv_setup_hypercall();
+	hypercall_page = hyperv_setup_hypercall(HYPERV_HYPERCALL_DEFAULT);
 
 	if (do_hypercall(HVCALL_SIGNAL_EVENT, 0x1234, true) ==
 	    HV_STATUS_INVALID_HYPERCALL_CODE) {
