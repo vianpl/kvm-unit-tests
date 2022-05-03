@@ -41,6 +41,12 @@
 #define check_mul_overflow(a, b) ({ (void)((int)(a) == (int)(b)); 0; })
 #endif
 
+#define lambda(return_type, function_body) \
+({ \
+	 return_type __fn__ function_body \
+	 __fn__; \
+ })
+
 #include <stdint.h>
 
 #define barrier()	asm volatile("" : : : "memory")
