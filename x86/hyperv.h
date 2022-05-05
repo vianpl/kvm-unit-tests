@@ -189,6 +189,8 @@ struct hv_event_flags_page {
 
 #define HV_HYPERCALL_FAST               (1u << 16)
 
+#define HVCALL_ENABLE_PARTITION_VTL             0x0d
+#define HVCALL_ENABLE_VP_VTL                    0x0f
 #define HVCALL_GET_VP_REGISTERS                 0x50
 #define HVCALL_SET_VP_REGISTERS                 0x51
 #define HVCALL_POST_MESSAGE                     0x5c
@@ -362,5 +364,117 @@ struct hv_get_set_vp_registers {
         union hv_input_vtl input_vtl;
         uint8_t padding[3];
 } __attribute__((packed));
+
+union hv_enable_partition_vtl_flags {
+        uint8_t as_u8;
+        struct {
+                uint8_t enable_mbec:1;
+                uint8_t reserved:7;
+        } __attribute__((packed));
+};
+
+struct hv_enable_partition_vtl {
+        uint64_t target_partition_id;
+        uint8_t target_vtl;
+        union hv_enable_partition_vtl_flags flags;
+        uint8_t reserved[6];
+} __attribute__((packed));
+
+struct hv_x64_segment_register {
+        uint64_t base;
+        uint32_t limit;
+        uint16_t selector;
+        union {
+                struct {
+                        uint16_t type:4;
+                        uint16_t s:1;
+                        uint16_t dpl:2;
+                        uint16_t p:1;
+                        uint16_t reserved:4;
+                        uint16_t avail:1;
+                        uint16_t l:1;
+                        uint16_t db:1;
+                        uint16_t g:1;
+                };
+                uint16_t attributes;
+        };
+};
+
+struct hv_x64_table_register {
+        uint16_t _pad[3];
+        uint16_t limit;
+        uint64_t base;
+};
+
+/* Initial arch execution context set for VTL of a specific VP by HvEnableVpVtl */
+struct hv_initial_vp_context {
+        uint64_t rip;
+        uint64_t rsp;
+        uint64_t rflags;
+
+        struct hv_x64_segment_register cs;
+        struct hv_x64_segment_register ds;
+        struct hv_x64_segment_register es;
+        struct hv_x64_segment_register fs;
+        struct hv_x64_segment_register gs;
+        struct hv_x64_segment_register ss;
+        struct hv_x64_segment_register tr;
+        struct hv_x64_segment_register ldtr;
+
+        struct hv_x64_table_register idtr;
+        struct hv_x64_table_register gdtr;
+
+        uint64_t efer;
+        uint64_t cr0;
+        uint64_t cr3;
+        uint64_t cr4;
+        uint64_t msr_cr_pat;
+} __attribute__((packed));
+
+struct hv_enable_vp_vtl {
+        uint64_t target_partition_id;
+        uint32_t vp_index;
+        uint8_t target_vtl;
+        uint8_t reserved[3];
+        struct hv_initial_vp_context vp_vtl_context;
+} __attribute__((packed));
+
+#define HV_REGISTER_VSM_VP_STATUS               0x000D0003
+#define HV_REGISTER_VSM_PARTITION_STATUS        0x000D0004
+#define HV_REGISTER_VSM_CAPABILITIES            0x000D0006
+
+/* Partition-wide VSM status */
+union hv_register_vsm_partition_status {
+        uint64_t as_u64;
+        struct {
+                uint64_t enabled_vtl_set:16;
+                uint64_t maximum_vtl:4;
+                uint64_t mbec_enabled_vtl_set:16;
+                uint64_t reserved:28;
+        } __attribute__((packed));
+};
+
+/* Per-VCPU VSM status */
+union hv_register_vsm_vp_status {
+        uint64_t as_u64;
+        struct {
+                uint64_t active_vtl:4;
+                uint64_t active_mbec_enabled:1;
+                uint64_t reserved0:11;
+                uint64_t enabled_vtl_set:16;
+                uint64_t reserved1:32;
+        } __attribute__((packed));
+};
+
+/* Advertised partition VSM capabilities */
+union hv_register_vsm_capabilities {
+        uint64_t as_u64;
+        struct {
+                uint64_t reserved:46;
+                uint64_t deny_lower_vtl_startup:1;
+                uint64_t mbec_vtl_mask:16;
+                uint64_t dr6_shared:1;
+        } __attribute__((packed));
+};
 
 #endif

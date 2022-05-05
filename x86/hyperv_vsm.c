@@ -232,6 +232,49 @@ static inline uint64_t get_vp_register64(uint32_t name)
 	return get_vp_register(name).low;
 }
 
+/* HvEnablePartitionVtl hypercall */
+static uint64_t hv_enable_partition_vtl(uint64_t partition_id,
+					uint8_t target_vtl,
+					union hv_enable_partition_vtl_flags flags)
+{
+	struct hv_enable_partition_vtl args = {0};
+	args.target_partition_id = partition_id;
+	args.target_vtl = target_vtl;
+	args.flags = flags;
+
+	struct hyperv_hypercall_thunk hc = {0};
+	hc.fast = true;
+	hc.code = HVCALL_ENABLE_PARTITION_VTL;
+	hc.arg1 = ((uint64_t*)&args)[0];
+	hc.arg2 = ((uint64_t*)&args)[1];
+
+	do_hypercall(&hc);
+	return hc.result;
+}
+
+/* HvEnableVpVtl hypercall */
+static uint64_t hv_enable_vp_vtl(uint64_t partition_id,
+				 uint32_t vp_index,
+				 uint8_t target_vtl,
+				 const struct hv_initial_vp_context *ctx)
+{
+	struct hv_vcpu *vcpu = vp_self();
+
+	struct hv_enable_vp_vtl args;
+	args.target_partition_id = partition_id;
+	args.vp_index = vp_index;
+	args.target_vtl = target_vtl;
+	memcpy(&args.vp_vtl_context, ctx, sizeof(*ctx));
+
+	struct hyperv_hypercall_thunk hc = {0};
+	hc.code = HVCALL_ENABLE_VP_VTL;
+	hc.arg1 = virt_to_phys(vcpu->input_page);
+	push_input_data(vcpu->input_page, &args, sizeof(args));
+
+	do_hypercall(&hc);
+	return hc.result;
+}
+
 static void init_vcpu(void)
 {
 	uint32_t apicid = smp_id();
@@ -336,6 +379,75 @@ static void test_get_set_vp_registers_negative(bool fast)
 	}
 }
 
+/*
+ * Negative tests for HvEnablePartitionVtl hypercall
+ */
+static void test_vsm_enable_partition_vtl_negative(void)
+{
+	union hv_register_vsm_capabilities vsm_capabilities;
+	vsm_capabilities.as_u64 = get_vp_register64(HV_REGISTER_VSM_CAPABILITIES);
+
+	union hv_register_vsm_partition_status vsm_status;
+	vsm_status.as_u64 = get_vp_register64(HV_REGISTER_VSM_PARTITION_STATUS);
+
+	union hv_enable_partition_vtl_flags flags = {0};
+
+	/* Bad partition id */
+	report(
+		hv_enable_partition_vtl(42, 0, flags) == HV_STATUS_INVALID_PARTITION_ID,
+		"EnablePartitionVtl: Bad partition ID"
+        );
+
+	/* VTL0 already enabled */
+	report(
+		hv_enable_partition_vtl(HV_PARTITION_ID_SELF, 0, flags) == HV_STATUS_INVALID_PARAMETER,
+		"EnablePartitionVtl: VTL0 already enabled"
+	);
+
+	/* Cannot enable VTL past maximum supported */
+	report(
+		hv_enable_partition_vtl(
+		HV_PARTITION_ID_SELF, vsm_status.maximum_vtl + 1, flags) == HV_STATUS_INVALID_PARAMETER,
+		"EnablePartitionVtl: Maximum VTL"
+	);
+
+	/* MBEC cannot be enabled (for VTL1 in this case) if not supported */
+	if ((vsm_capabilities.mbec_vtl_mask & (1u << 1)) == 0) {
+		union hv_enable_partition_vtl_flags flags = {0};
+		flags.enable_mbec = 1;
+		report(
+			hv_enable_partition_vtl(HV_PARTITION_ID_SELF, 1, flags) == HV_STATUS_INVALID_PARAMETER,
+			"EnablePartitionVtl: MBEC not allowed"
+		);
+	}
+}
+
+/*
+ * Negative tests for HvEnableVpVtl hypercall
+ */
+static void test_vsm_enable_vp_vtl_negative(void)
+{
+	struct hv_initial_vp_context ctx = {0};
+
+	/* Bad partition id */
+	report(
+		hv_enable_vp_vtl(42, HV_VP_INDEX_SELF, 1, &ctx) == HV_STATUS_INVALID_PARTITION_ID,
+		"EnableVpVtl: Bad partition ID"
+	);
+
+	/* Bad vp index */
+	report(
+		hv_enable_vp_vtl(HV_PARTITION_ID_SELF, (u32)-1, 1, &ctx) == HV_STATUS_INVALID_VP_INDEX,
+		"EnableVpVtl: Bad VP Index"
+	);
+
+	/* VTL0 already enabled */
+	report(
+		hv_enable_vp_vtl(HV_PARTITION_ID_SELF, HV_VP_INDEX_SELF, 0, &ctx) == HV_STATUS_INVALID_PARAMETER,
+		"EnableVpVtl: VTL0 already enabled"
+	);
+}
+
 int main(int ac, char **av)
 {
 	setup_vm();
@@ -368,6 +480,9 @@ int main(int ac, char **av)
 
 	test_get_set_vp_registers_negative(true);
 	test_get_set_vp_registers_negative(false);
+
+	test_vsm_enable_partition_vtl_negative();
+	test_vsm_enable_vp_vtl_negative();
 
 summary:
 	return report_summary();
