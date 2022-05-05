@@ -818,6 +818,35 @@ static void test_vsm_enable_vp_vtl_negative(void)
 	);
 }
 
+/*
+ * Checks that initial hyper-v VSM config is as expected
+ */
+static void test_vsm_initial_status(void)
+{
+	union hv_register_vsm_capabilities vsm_capabilities;
+	vsm_capabilities.as_u64 = get_vp_register64(HV_REGISTER_VSM_CAPABILITIES);
+
+	union hv_register_vsm_partition_status vsm_status;
+	vsm_status.as_u64 = get_vp_register64(HV_REGISTER_VSM_PARTITION_STATUS);
+	report(
+		/* Only VTL0 is enabled */
+		(vsm_status.enabled_vtl_set & (1u << 0)) &&
+		(vsm_status.mbec_enabled_vtl_set & ~vsm_capabilities.mbec_vtl_mask) == 0,
+		"VSM partition config"
+	);
+
+	on_cpus(lambda(void, (void* unused) {
+		union hv_register_vsm_vp_status vsm_vp_status;
+		vsm_vp_status.as_u64 = get_vp_register64(HV_REGISTER_VSM_VP_STATUS);
+		report(
+			/* Only VTL0 is enabled */
+			(vsm_vp_status.enabled_vtl_set & (1u << 0)) &&
+			(vsm_vp_status.active_vtl == 0),
+			"VSM VP config on vcpu %d", smp_id()
+		);
+	}), NULL);
+}
+
 int main(int ac, char **av)
 {
 	/*
@@ -860,6 +889,8 @@ int main(int ac, char **av)
 
 	test_vsm_enable_partition_vtl_negative();
 	test_vsm_enable_vp_vtl_negative();
+
+	test_vsm_initial_status();
 
 	init_vsm();
 
