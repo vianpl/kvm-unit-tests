@@ -24,12 +24,17 @@ struct hv_vcpu {
 
 	/* Per-VTL data */
 	struct hv_vtl_vcpu_ctx vtl[HV_NUM_VTLS];
+
+	/* Function pointer set by VTL0 to call in VTL1 */
+	void (*vtl_thunk_fptr) (void);
 };
 
 /* Per-VTL partition-wide context */
 struct hv_vtl_partition_ctx
 {
 	void *hypercall_page;
+	void *vtl_call_va;
+	void *vtl_return_va;
 };
 
 static struct hv_vcpu g_vcpus[MAX_CPUS];
@@ -74,6 +79,26 @@ static inline void* push_input_data(void* pinput, const void* src, size_t nbytes
 static inline void do_hypercall(struct hyperv_hypercall_thunk *hc)
 {
 	hyperv_hypercall(vtl_partition_ctx()->hypercall_page, hc);
+}
+
+static bool read_vtl_control(struct hv_vp_vtl_control *vtl_control)
+{
+	if (!(rdmsr(HV_X64_MSR_VP_ASSIST_PAGE) & 0x1))
+		return false;
+
+	struct hv_vp_assist_page *vp_assist = vtl_vcpu_ctx()->vp_assist_page;
+	memcpy(vtl_control, &vp_assist->vtl_control, sizeof(*vtl_control));
+	return true;
+}
+
+static bool write_vtl_control(struct hv_vp_vtl_control *vtl_control)
+{
+	if (!(rdmsr(HV_X64_MSR_VP_ASSIST_PAGE) & 0x1))
+		return false;
+
+	struct hv_vp_assist_page *vp_assist = vtl_vcpu_ctx()->vp_assist_page;
+	memcpy(&vp_assist->vtl_control, vtl_control, sizeof(*vtl_control));
+	return true;
 }
 
 /* HvSetVpRegister hypercall */
@@ -275,6 +300,163 @@ static uint64_t hv_enable_vp_vtl(uint64_t partition_id,
 	return hc.result;
 }
 
+__attribute__((used)) static void vtl_inc(void)
+{
+	set_active_vtl(get_active_vtl() + 1);
+}
+
+__attribute__((used)) static void vtl_dec(void)
+{
+	set_active_vtl(get_active_vtl() - 1);
+}
+
+/* VA to jump to when performing a VTL call from current VTL */
+__attribute__((used)) static void* vtl_call_va(void)
+{
+	return vtl_partition_ctx()->vtl_call_va;
+}
+
+/* VA to jump to when performing a VTL return from current VTL */
+__attribute__((used)) static void* vtl_return_va(void)
+{
+	return vtl_partition_ctx()->vtl_return_va;
+}
+
+/*
+ * VTL1 call trampoline.
+ *
+ * VTL0 does not save any of its own state, everything is handled by VTL1.
+ * This is because we should always expect VTL interrupt entries anyway,
+ * which will no go through normal VTL call gates.
+ */
+void __vtl_call_trampoline(void);
+asm (
+"__vtl_call_trampoline: \n"
+
+	/* RCX must be 0 by spec */
+	"xor    %rcx, %rcx \n"
+	"call	vtl_call_va \n"
+	"jmp    %rax \n"
+);
+
+/*
+ * VTL1 entry
+ *
+ * On the very first VTL1 call we enter at the beginning.
+ * When we later do a VTL return, hypervisor saves next instruction RIP for re-entry,
+ * so on subsequent VTL calls we end up where we left off: right after previous VTL return.
+ */
+void __vtl1_entry(void);
+asm (
+"__vtl1_entry: \n"
+
+	/* Save VTL0 SysV ABI scratch space registers.
+	 * We don't have to do this for normal VTL calls, only for VTL interrupts,
+	 * but since we don't want to figure out entry type here, we will just go for the
+	 * worst case and keep it simple(r). */
+	"push   %rdi \n"
+	"push   %rsi \n"
+	"push   %rdx \n"
+	"push   %r8 \n"
+	"push   %r9 \n"
+	"push   %r10 \n"
+	"push   %r11 \n"
+	"push   %rax \n"
+	"push   %rcx \n"
+
+	/* Increment VTL number on entry */
+	"call	vtl_inc \n"
+
+	/* Entry handler is reponsible to manage VTL0's rax and rcx values
+	 * by potentially passing them over to be restored by the hypervisor. */
+	"pop	%rsi \n"
+	"pop	%rdi \n"
+	"call   vtl1_entry \n"
+
+	/* Save the fast return flag */
+	"push	%rax \n"
+
+	/* Save VTL return VA */
+	"call	vtl_return_va \n"
+	"push	%rax \n"
+
+	/* Decrement VTL number on return */
+	"call	vtl_dec \n"
+
+	/* Load fast return VA and fast return flag */
+	"pop	%rax \n"
+	"pop	%rcx \n"
+
+	/* Restore previous scratch VTL state */
+	"pop    %r11 \n"
+	"pop    %r10 \n"
+	"pop    %r9 \n"
+	"pop    %r8 \n"
+	"pop    %rdx \n"
+	"pop    %rsi \n"
+	"pop    %rdi \n"
+
+	/* Execute VTL return */
+	"call   %rax\n"
+
+	/* VTL return will restore context past its vmcall, so we will end up here
+	 * upon subsequent VTL re-entries and not at the beginning. */
+	"jmp    __vtl1_entry \n"
+);
+
+/* Return true if fast return is allowed */
+__attribute__((used)) static bool vtl1_entry(u64 rax, u64 rcx)
+{
+	struct hv_vcpu *vcpu = vp_self();
+	struct hv_vp_vtl_control vtl_control;
+	bool is_fast_return;
+
+	assert(get_active_vtl() == 1);
+
+	/* We are ready to enable interrupts now */
+	sti();
+
+	/* Read vtl control to check call reason (if VP_ASSIST page is already mapped) */
+	if (read_vtl_control(&vtl_control)) {
+		switch (vtl_control.entry_reason) {
+		case HV_VTL_ENTRY_VTL_CALL:
+			vcpu->vtl_thunk_fptr();
+
+			/* Fast return is okay for VTL calls, because those look like a function call
+			 * and RAX, RCX are scratch registers in SysV ABI, caller should've kept them safe. */
+			is_fast_return = true;
+			break;
+		case HV_VTL_ENTRY_INTERRUPT:
+			/* For VTL interrupts we need to ask hypervisor to restore guest rax/rcx */
+			vtl_control.vtl_return_x64_rax = rax;
+			vtl_control.vtl_return_x64_rcx = rcx;
+			if (!write_vtl_control(&vtl_control))
+				report_abort("Could not write VTL control when exiting from VTL interrupt");
+			is_fast_return = false;
+			break;
+		default:
+			report_abort("Unexpected VTL entry reason %u\n", vtl_control.entry_reason);
+		};
+	} else {
+		/* Assume VTL call without a VP assist page */
+		vcpu->vtl_thunk_fptr();
+		is_fast_return = true;
+	}
+
+	cli();
+	return is_fast_return;
+}
+
+/*
+ * Perform a call to VTL1.
+ * Takes fptr and executes it in VTL1 context in current VCPU.
+ */
+static inline void run_in_vtl1(void (*fptr)(void))
+{
+	vp_self()->vtl_thunk_fptr = fptr;
+	__vtl_call_trampoline();
+}
+
 static void init_vcpu(void)
 {
 	uint32_t apicid = smp_id();
@@ -309,6 +491,11 @@ static inline void init_vtl_partition_ctx(void)
 	vtl_partition_ctx()->hypercall_page = hyperv_setup_hypercall(HYPERV_ENABLE_FAST_XMM_CALLS);
 	if (!vtl_partition_ctx()->hypercall_page)
 		report_abort("Could not setup hypercall page");
+
+	union hv_register_vsm_code_page_offsets vtl_offsets;
+	vtl_offsets.as_u64 = get_vp_register64(HV_REGISTER_VSM_CODE_PAGE_OFFSETS);
+	vtl_partition_ctx()->vtl_call_va = vtl_partition_ctx()->hypercall_page + vtl_offsets.vtl_call_offset;
+	vtl_partition_ctx()->vtl_return_va = vtl_partition_ctx()->hypercall_page + vtl_offsets.vtl_return_offset;
 }
 
 static void test_get_set_vp_registers_negative(bool fast)

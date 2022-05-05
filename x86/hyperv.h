@@ -26,10 +26,45 @@
 #define HV_X64_MSR_REFERENCE_TSC                0x40000021
 #define HV_X64_MSR_VP_ASSIST_PAGE               0x40000073
 
+enum hv_vtl_entry_reason {
+        HV_VTL_ENTRY_RESERVED = 0,
+        HV_VTL_ENTRY_VTL_CALL = 1,
+        HV_VTL_ENTRY_INTERRUPT = 2,
+};
+
+struct hv_vp_vtl_control {
+        uint32_t entry_reason;
+
+        union {
+                uint8_t as_u8;
+                struct {
+                        uint8_t vina_asserted:1;
+                        uint8_t reserved0:7;
+                };
+        };
+
+        uint8_t reserved1[3];
+
+        union {
+                struct {
+                        uint64_t vtl_return_x64_rax;
+                        uint64_t vtl_return_x64_rcx;
+                };
+
+                struct {
+                        uint32_t vtl_return_x86_eax;
+                        uint32_t vtl_return_x86_ecx;
+                        uint32_t vtl_return_x86_edx;
+                        uint32_t reserved2;
+                };
+        };
+} __attribute__((packed));
+
 /* Define virtual processor assist page structure. */
 struct hv_vp_assist_page {
         uint32_t apic_assist;
         uint32_t reserved1;
+        struct hv_vp_vtl_control vtl_control;
         /* There is more data below which we don't care about yet */
 } __attribute__((packed));
 
@@ -439,9 +474,20 @@ struct hv_enable_vp_vtl {
         struct hv_initial_vp_context vp_vtl_context;
 } __attribute__((packed));
 
+#define HV_REGISTER_VSM_CODE_PAGE_OFFSETS       0x000D0002
 #define HV_REGISTER_VSM_VP_STATUS               0x000D0003
 #define HV_REGISTER_VSM_PARTITION_STATUS        0x000D0004
 #define HV_REGISTER_VSM_CAPABILITIES            0x000D0006
+
+/* VTL call/return hypercall page offsets register */
+union hv_register_vsm_code_page_offsets {
+        u64 as_u64;
+        struct {
+                u64 vtl_call_offset:12;
+                u64 vtl_return_offset:12;
+                u64 reserved:40;
+        } __attribute__((packed));
+};
 
 /* Partition-wide VSM status */
 union hv_register_vsm_partition_status {
