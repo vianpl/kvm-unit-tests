@@ -224,6 +224,7 @@ struct hv_event_flags_page {
 
 #define HV_HYPERCALL_FAST               (1u << 16)
 
+#define HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE      0x02
 #define HVCALL_ENABLE_PARTITION_VTL             0x0d
 #define HVCALL_ENABLE_VP_VTL                    0x0f
 #define HVCALL_GET_VP_REGISTERS                 0x50
@@ -400,6 +401,15 @@ struct hv_get_set_vp_registers {
         uint8_t padding[3];
 } __attribute__((packed));
 
+#define HV_FLUSH_ALL_PROCESSORS             0x00000001
+
+struct hv_tlb_flush {
+    uint64_t address_space;
+    uint32_t flags;
+    uint32_t _padding;
+    uint64_t processor_mask;
+} __attribute__((packed));
+
 union hv_enable_partition_vtl_flags {
         uint8_t as_u8;
         struct {
@@ -478,6 +488,7 @@ struct hv_enable_vp_vtl {
 #define HV_REGISTER_VSM_VP_STATUS               0x000D0003
 #define HV_REGISTER_VSM_PARTITION_STATUS        0x000D0004
 #define HV_REGISTER_VSM_CAPABILITIES            0x000D0006
+#define HV_REGISTER_VSM_VP_SECURE_CONFIG_VTL0   0x000D0010
 
 /* VTL call/return hypercall page offsets register */
 union hv_register_vsm_code_page_offsets {
@@ -520,6 +531,16 @@ union hv_register_vsm_capabilities {
                 uint64_t deny_lower_vtl_startup:1;
                 uint64_t mbec_vtl_mask:16;
                 uint64_t dr6_shared:1;
+        } __attribute__((packed));
+};
+
+/* Partition per-VTL VSM configs to configure lower VTLs */
+union hv_register_vsm_vp_secure_vtl_config {
+        uint64_t as_u64;
+        struct {
+                uint64_t mbec_enabled:1;
+                uint64_t tlb_locked:1;
+                uint64_t reserved0:62;
         } __attribute__((packed));
 };
 
