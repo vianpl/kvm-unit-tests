@@ -847,6 +847,95 @@ static void test_vsm_initial_status(void)
 	}), NULL);
 }
 
+/*
+ * Check that RFLAGS register is isolated per-VTL
+ */
+static void test_vtl_vp_rflags_isolation(void)
+{
+	/* We will set RF and VTL1 will make sure it is still cleared on its end.
+	 * RF has no effect when TF is not set and it has very little chance of being
+	 * clobbered by VTL call/return code along the way */
+	write_rflags(read_rflags() | X86_EFLAGS_RF);
+	if ((read_rflags() & X86_EFLAGS_RF) != 0)
+		report_abort("Couldn't set RF for VTL isolation test");
+
+	run_in_vtl1(lambda(void, (void) {
+		report((read_rflags() & X86_EFLAGS_RF) == 0, "VTL rflags isolation test");
+	}));
+
+	write_rflags(read_rflags() & ~(u64)X86_EFLAGS_RF);
+}
+
+/*
+ * Check that CR3 values are different between VTLs
+ */
+static void test_vtl_vp_paging_isolation(void)
+{
+	u64 vtl0_cr3 = read_cr3();
+	run_in_vtl1(lambda(void, (void) {
+		report(read_cr3() != vtl0_cr3, "VTL VP paging isolation");
+	}));
+}
+
+/*
+ * There is little sense in checking for segmentation isolation under x86-64,
+ * and we can't change GS.base because kvm-unit-tests relies on it having the same value.
+ * So we will test for FS.base modifications to be isolated instead.
+ */
+static void test_vtl_vp_segmentation_isolation(void)
+{
+	/* Point new fsbase to some random page */
+	void *page = alloc_page();
+	if (!page)
+		report_abort("Couldn't allocate a test page");
+
+	u64 cur_fsbase = rdmsr(MSR_FS_BASE);
+	u64 new_fsbase = virt_to_phys(page);
+
+	/* Fill the page data with something decidedly different from what current fsbase points to */
+	*(u64*)new_fsbase = ~(*(u64*)cur_fsbase);
+
+	/* Set new fsbase and ask VTL1 to read from its fs:0 and check the expected value */
+	wrmsr(MSR_FS_BASE, new_fsbase);
+	run_in_vtl1(lambda(void, (void) {
+		u64 fsbase = rdmsr(MSR_FS_BASE);
+		report(fsbase != new_fsbase && *(u64*)fsbase != *(u64*)new_fsbase, "VTL segmentation isolation");
+	}));
+
+	wrmsr(MSR_FS_BASE, cur_fsbase);
+	free_page(page);
+}
+
+/*
+ * Check that TPR/CR8 is isolated between per-VTL apics
+ */
+static void test_vtl_vp_tpr_isolation(void)
+{
+	/* Both VTL TPRs are 0 by default */
+	write_cr8(1);
+
+	/* Check that VTL1 didn't see our changes and make it's own changes too */
+	run_in_vtl1(lambda(void, (void) {
+		report(read_cr8() == 0, "VTL1 TPR isolation");
+		write_cr8(2);
+	}));
+
+	/* VTL0 also didn't see VTL1's changes */
+	report(read_cr8() == 1, "VTL0 TPR isolation");
+
+	/* Reset everything back */
+	run_in_vtl1(lambda(void, (void) { write_cr8(0); }));
+	write_cr8(0);
+}
+
+static void test_vtl_vp_isolation(void)
+{
+	test_vtl_vp_rflags_isolation();
+	test_vtl_vp_paging_isolation();
+	test_vtl_vp_segmentation_isolation();
+	test_vtl_vp_tpr_isolation();
+}
+
 int main(int ac, char **av)
 {
 	/*
@@ -893,6 +982,8 @@ int main(int ac, char **av)
 	test_vsm_initial_status();
 
 	init_vsm();
+
+	test_vtl_vp_isolation();
 
 summary:
 	return report_summary();
