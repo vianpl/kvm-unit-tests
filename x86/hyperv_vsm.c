@@ -3,6 +3,8 @@
 #include "smp.h"
 #include "apic.h"
 #include "alloc_page.h"
+#include "atomic.h"
+#include "delay.h"
 #include "hyperv.h"
 
 #define MAX_CPUS 4
@@ -261,6 +263,27 @@ static inline struct hv_vp_register_val get_vp_register(uint32_t name)
 static inline uint64_t get_vp_register64(uint32_t name)
 {
 	return get_vp_register(name).low;
+}
+
+/* HvFlushVirtualAddressSpace hypercall */
+static uint64_t hv_flush_address_space(uint32_t flags, uint64_t vp_mask)
+{
+	struct hv_vcpu *vcpu = vp_self();
+
+	struct hv_tlb_flush args;
+	args.address_space = read_cr3();
+	args.flags = flags;
+	args.processor_mask = vp_mask;
+
+	/* We'll just default to slow call for this one, since it's not being unit-tested here */
+	struct hyperv_hypercall_thunk hc = {0};
+	hc.fast = false;
+	hc.code = HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE;
+	hc.arg1 = virt_to_phys(vcpu->input_page);
+
+	push_input_data(vcpu->input_page, &args, sizeof(args));
+	do_hypercall(&hc);
+	return hc.result;
 }
 
 /* HvEnablePartitionVtl hypercall */
@@ -936,6 +959,97 @@ static void test_vtl_vp_isolation(void)
 	test_vtl_vp_tpr_isolation();
 }
 
+/*
+ * VTL1 can lock TLB for VTL0 which means that whever VTL0 will attempt to
+ * execute a HvFlushAddressSpace hypercall it's going to be blocked in the hypervisor
+ * until VTL1 releaves the lock on this vcpu.
+ */
+
+static atomic_t g_tlb_lock_flag;
+static atomic_t g_tlb_flush_count;
+
+/* VCPU running here will hold the TLB lock for other VCPUs */
+static void vtl1_tlb_lock_thread(void)
+{
+	union hv_register_vsm_vp_secure_vtl_config vtl0_config = {0};
+	vtl0_config.tlb_locked = 1;
+
+	/* Lock the tlb locks on all vcpus.
+	 * Doing it with remote SetVpRegisters additionally tests it (but is maybe not the most convinient) */
+	uint32_t names[] = { HV_REGISTER_VSM_VP_SECURE_CONFIG_VTL0 };
+	struct hv_vp_register_val val = { .low = vtl0_config.as_u64 };
+	for (size_t i = 0; i < cpu_count(); ++i)
+		if (HV_STATUS_SUCCESS != hv_set_vp_registers(g_vcpus[i].vpid, HV_INPUT_VTL(1), names, &val, 1, true))
+			report_abort("Set VP registers failed");
+
+	atomic_inc(&g_tlb_lock_flag);
+
+	/* Since VTL0 thread is supposed to be blocked in the flush hypercall
+	 * it has no way of telling us that. So we'll resort to grace sleeps. */
+	delay(IPI_DELAY * cpu_count());
+
+	/* Unlock the tlb locks on all vcpus */
+	vtl0_config.tlb_locked = 0;
+	val.low = vtl0_config.as_u64;
+	for (size_t i = 0; i < cpu_count(); ++i)
+		if (HV_STATUS_SUCCESS != hv_set_vp_registers(g_vcpus[i].vpid, HV_INPUT_VTL(1), names, &val, 1, true))
+			report_abort("Set VP registers failed");
+
+	/* Wait for TLB flush threads to unblock themselves */
+	while (atomic_read(&g_tlb_flush_count) != cpu_count() - 1)
+		pause();
+}
+
+/* VCPU running here will be blocked in an attempt to flush all address spaces */
+static void vtl0_tlb_flush_thread(bool all_vcpus)
+{
+	u64 ret;
+
+	/* Wait for the locker thread to enforce the lock */
+	while (atomic_read(&g_tlb_lock_flag) != 1)
+		pause();
+
+	/* Block in the hypercall */
+	if (all_vcpus)
+		ret = hv_flush_address_space(HV_FLUSH_ALL_PROCESSORS, 0);
+	else
+		ret = hv_flush_address_space(0, 1ul << vp_self()->vpid);
+
+	if (ret != HV_STATUS_SUCCESS)
+		report_abort("Flush address space failed");
+
+	/* Tell VTL1 we're unblocked */
+	atomic_inc(&g_tlb_flush_count);
+}
+
+static void test_vtl_tlb_locking_on_cpu(void* arg)
+{
+	if (smp_id() == 0)
+		/* You're going to be the locking thread */
+		run_in_vtl1(vtl1_tlb_lock_thread);
+	else
+		/* The rest are going to be flushing threads */
+		vtl0_tlb_flush_thread(arg != 0ul);
+}
+
+static void test_vtl_tlb_locking(void)
+{
+	/* Stress-test for race conditions */
+	for (int i = 0; i < 64; ++i) {
+		/* Per-VCPU flushes */
+		atomic_set(&g_tlb_lock_flag, 0);
+		atomic_set(&g_tlb_flush_count, 0);
+		on_cpus(test_vtl_tlb_locking_on_cpu, (void*)0ul);
+
+		/* All-VCPU flushes for each thread */
+		atomic_set(&g_tlb_lock_flag, 0);
+		atomic_set(&g_tlb_flush_count, 0);
+		on_cpus(test_vtl_tlb_locking_on_cpu, (void*)1ul);
+	}
+
+	report(true, "VTL1 TLB locking");
+}
+
 int main(int ac, char **av)
 {
 	/*
@@ -984,6 +1098,7 @@ int main(int ac, char **av)
 	init_vsm();
 
 	test_vtl_vp_isolation();
+	test_vtl_tlb_locking();
 
 summary:
 	return report_summary();
