@@ -366,6 +366,7 @@ static uint64_t hv_enable_vp_vtl(uint64_t partition_id,
 /* Reserved VTL IRQ vectors */
 enum {
 	VTL_IPI_VECTOR = IPI_VECTOR + 1,
+	VTL_LVTT_VECTOR,
 };
 
 __attribute__((used)) static void vtl_inc(void)
@@ -1229,6 +1230,91 @@ static void test_cross_vtl_ipis(void)
 	test_vtl0_to_vtl1_ipi(target_cpu);
 }
 
+/*
+ * Test for local apic timers to (not) trigger VTL entry:
+ * - When an LVTT fires for a VTL1 apic and cpu is in VTL0, immediate VTL switch should be forced
+ * - When an LVTT fires for a VTL0 apic and cpu is in VTL1, event is not injected until return to VTL0
+ */
+
+#define DEFAULT_TEST_TIMER_PERIOD (100000000u)
+
+static atomic_t g_timers_seen;
+static u64 g_timer_tscs[HV_NUM_VTLS];
+
+VTL_IRQ_ENTRY(vtl_lvtt_entry, vtl_lvtt_handler);
+
+__attribute__((used)) static void vtl_lvtt_handler(void)
+{
+	g_timer_tscs[get_active_vtl()] = rdtsc();
+	apic_write(APIC_EOI, 0);
+	atomic_inc(&g_timers_seen);
+}
+
+static void arm_oneshot_timer(uint32_t interval)
+{
+	apic_write(APIC_LVTT, APIC_LVT_TIMER_ONESHOT | VTL_LVTT_VECTOR);
+	apic_write(APIC_TDCR, 0xb); /* Divide by 1 */
+	apic_write(APIC_TMICT, interval);
+}
+
+static inline void arm_oneshot_timer_default(void)
+{
+	arm_oneshot_timer(DEFAULT_TEST_TIMER_PERIOD);
+}
+
+static void vtl1_timer_test(void)
+{
+	memset(g_timer_tscs, 0, sizeof(g_timer_tscs));
+	atomic_set(&g_timers_seen, 0);
+
+	/* Arm timer in VTL1 and return back */
+	run_in_vtl1(arm_oneshot_timer_default);
+
+	/* Arm another time in VTL0 for twice the period of VTL1 */
+	arm_oneshot_timer(DEFAULT_TEST_TIMER_PERIOD * 2);
+	wait_atomic(&g_timers_seen, 2);
+
+	/* Expect to first see VTL1 timer firing followed by VTL0 */
+	report(	g_timer_tscs[0] > g_timer_tscs[1],
+		"VTL1 timer forces VTL entry (VTL0 tsc %lu > VTL1 tsc %lu)",
+		g_timer_tscs[0], g_timer_tscs[1]);
+}
+
+static void vtl0_timer_test(void)
+{
+	memset(g_timer_tscs, 0, sizeof(g_timer_tscs));
+	atomic_set(&g_timers_seen, 0);
+
+	/* Arm timer in VTL0 */
+	arm_oneshot_timer_default();
+
+	/* Enter VTL1, arm another timer with twice the period and stay in VTL1 until it fires */
+	run_in_vtl1(lambda(void, (void) {
+		arm_oneshot_timer(DEFAULT_TEST_TIMER_PERIOD * 2);
+		wait_atomic(&g_timers_seen, 1);
+	}));
+
+	/* Upon return to VTL0 first timer should be delivered */
+	wait_atomic(&g_timers_seen, 2);
+
+	/* Expect to first see VTL1 timer firing followed by VTL0 */
+	report(	g_timer_tscs[0] > g_timer_tscs[1],
+		"VTL0 timer is injected on return to VTL1 (VTL0 tsc %lu > VTL1 tsc %lu)",
+		g_timer_tscs[0], g_timer_tscs[1]);
+}
+
+static void test_vtl_local_timer(void)
+{
+	/* IDTR is shared between VTLs, so we can set it globally */
+	void vtl_lvtt_entry(void);
+	set_idt_entry(VTL_LVTT_VECTOR, vtl_lvtt_entry, 0);
+
+	sti();
+	vtl0_timer_test();
+	vtl1_timer_test();
+	cli();
+}
+
 int main(int ac, char **av)
 {
 	/*
@@ -1283,6 +1369,7 @@ int main(int ac, char **av)
 
 	test_vtl1_apic_disable();
 	test_cross_vtl_ipis();
+	test_vtl_local_timer();
 
 summary:
 	return report_summary();
