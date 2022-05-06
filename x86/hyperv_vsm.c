@@ -27,6 +27,10 @@ struct hv_vcpu {
 
 	/* Function pointer set by VTL0 to call in VTL1 */
 	void (*vtl_thunk_fptr) (void);
+
+	/* Base addresses for GS and FS segments on this cpu */
+	uint64_t gs_base;
+	uint64_t fs_base;
 };
 
 /* Per-VTL partition-wide context */
@@ -457,6 +461,91 @@ static inline void run_in_vtl1(void (*fptr)(void))
 	__vtl_call_trampoline();
 }
 
+static void *make_vsm_page_table(void)
+{
+	/* Make a 4GiB identity mapped page table loosely based on what VTL0 has */
+	uint64_t *l2 = alloc_pages(2); /* 4 pages */
+	if (!l2)
+		report_abort("Couldn't allocate page table pages for VTL1");
+
+	for (uint64_t i = 0; i < 512 * 4; ++i)
+		l2[i] = 0x1e7ull | (i << 21);
+
+	uint64_t *l3 = alloc_page();
+	if (!l3)
+		report_abort("Couldn't allocate page table pages for VTL1");
+
+	for (uint64_t i = 0; i < 4; ++i)
+		l3[i] = (virt_to_phys(l2) + 4096 * i) | 0x7;
+
+	uint64_t *l4 = alloc_page();
+	if (!l4)
+		report_abort("Couldn't allocate page table pages for VTL1");
+
+	*l4 = virt_to_phys(l3) | 0x7;
+	return l4;
+}
+
+/*
+ * Setup (initial) VTL1 context which is a fully initialized 64-bit mode
+ */
+static u64 enable_vp_vtl(void *cr3, struct hv_vcpu* target_vcpu)
+{
+	struct hv_initial_vp_context ctx = {0};
+
+	void *stack_page = alloc_page();
+	if (!stack_page)
+		report_abort("Failed to alloc VTL1 stack");
+
+	ctx.rsp = (uintptr_t)stack_page + PAGE_SIZE;
+	ctx.rip = (uintptr_t)__vtl1_entry;
+	ctx.rflags = 0x2; /* Bit 1 is always set, interrupts disabled */
+
+	struct descriptor_table_ptr dtbl;
+	sgdt(&dtbl);
+	ctx.gdtr.base = dtbl.base;
+	ctx.gdtr.limit = dtbl.limit;
+	sidt(&dtbl);
+	ctx.idtr.base = dtbl.base;
+	ctx.idtr.limit = dtbl.limit;
+
+	ctx.cs.base = 0;
+	ctx.cs.limit = 0xFFFFFFFF;
+	ctx.cs.selector = read_cs();
+	ctx.cs.type = 0b1011;
+	ctx.cs.s = 1;
+	ctx.cs.p = 1;
+	ctx.cs.g = 1;
+	ctx.cs.l = 1;
+
+	ctx.ds.base = 0;
+	ctx.ds.limit = 0xFFFFFFFF;
+	ctx.ds.selector = read_ds();
+	ctx.ds.type = 0b0011;
+	ctx.ds.s = 1;
+	ctx.ds.p = 1;
+	ctx.ds.g = 1;
+	ctx.ds.db = 1;
+	ctx.es = ctx.ss = ctx.ds;
+
+	/* GS_BASE is used in kvm-unit-tests to address per-cpu data */
+	ctx.gs.base = target_vcpu->gs_base;
+	ctx.fs.base = target_vcpu->fs_base;
+
+	/* TR and LDTR are not used but we still need them present for vmentry */
+	ctx.tr.type = 0b1011;
+	ctx.tr.p = 1;
+	ctx.ldtr.type = 0b0010;
+	ctx.ldtr.p = 1;
+
+	ctx.efer = EFER_LMA | EFER_LME;
+	ctx.cr0 = X86_CR0_PG | X86_CR0_WP | X86_CR0_PE;
+	ctx.cr4 = X86_CR4_PAE | X86_CR4_OSFXSR;
+	ctx.cr3 = (uintptr_t)cr3;
+
+	return hv_enable_vp_vtl(HV_PARTITION_ID_SELF, target_vcpu->vpid, 1, &ctx);
+}
+
 static void init_vcpu(void)
 {
 	uint32_t apicid = smp_id();
@@ -471,6 +560,8 @@ static void init_vcpu(void)
 	if (!vcpu->input_page || !vcpu->output_page)
 		report_abort("Failed to allocate input/output pages");
 	vcpu->active_vtl = 0;
+	vcpu->gs_base = rdmsr(MSR_GS_BASE);
+	vcpu->fs_base = rdmsr(MSR_FS_BASE);
 
 	/* Enable OSFXSR for XMM hypercall arguments */
 	write_cr4(read_cr4() | X86_CR4_OSFXSR);
@@ -496,6 +587,68 @@ static inline void init_vtl_partition_ctx(void)
 	vtl_offsets.as_u64 = get_vp_register64(HV_REGISTER_VSM_CODE_PAGE_OFFSETS);
 	vtl_partition_ctx()->vtl_call_va = vtl_partition_ctx()->hypercall_page + vtl_offsets.vtl_call_offset;
 	vtl_partition_ctx()->vtl_return_va = vtl_partition_ctx()->hypercall_page + vtl_offsets.vtl_return_offset;
+}
+
+static void init_vsm(void)
+{
+	/* Enable VTL1 on partition */
+	union hv_enable_partition_vtl_flags flags = {0};
+	uint64_t res = hv_enable_partition_vtl(HV_PARTITION_ID_SELF, 1, flags);
+	if (res != HV_STATUS_SUCCESS)
+		report_abort("Failed to enable VTL1 for partition: 0x%lx\n", res);
+
+	/* Make sure we see VTL1 enabled partition-wide */
+	union hv_register_vsm_partition_status vsm_status;
+	vsm_status.as_u64 = get_vp_register64(HV_REGISTER_VSM_PARTITION_STATUS);
+	report(vsm_status.enabled_vtl_set == 0b11, "VTL1 enabled partition-wide");
+
+	/* Populate VTL1 page table */
+	void *cr3 = make_vsm_page_table();
+	if (!cr3)
+		report_abort("Failed to create VTL1 page table");
+
+	/* Enable VTL1 on current cpu */
+	res = enable_vp_vtl(cr3, vp_self());
+	if (res != HV_STATUS_SUCCESS)
+		report_abort("Failed to enable VTL1 for VP %u: 0x%lx\n", smp_id(), res);
+
+	union hv_register_vsm_vp_status vsm_vp_status;
+	vsm_vp_status.as_u64 = get_vp_register64(HV_REGISTER_VSM_VP_STATUS);
+	report(vsm_vp_status.enabled_vtl_set == 0b11, "VTL1 enabled on cpu%d", smp_id());
+
+	/* Since we now have 1 VP with VTL1 enabled, only it can enabled VTL1 for the rest of VPs (per TLFS spec).
+	 * Check that this restriction holds by observing that other VPs can't enable VTL1 */
+	on_cpus(lambda(void, (void* unused) {
+		res = enable_vp_vtl(cr3, vp_self());
+		report(res != HV_STATUS_SUCCESS, "Expected to not be able to enable VTL1 on VP%d: %lu", smp_id(), res);
+	}), NULL);
+
+	/* Use this cpu to init partition-wide VTL1 context */
+	run_in_vtl1(init_vtl_partition_ctx);
+
+	/* Enter VTL1 on this CPU and enable VTL1 for real on other CPUs */
+	run_in_vtl1(lambda(void, (void) {
+		for (size_t i = 0; i < cpu_count(); i++) {
+			struct hv_vcpu* vcpu = &g_vcpus[i];
+			if (vcpu->apicid == smp_id())
+				continue;
+
+			uint64_t res = enable_vp_vtl(cr3, vcpu);
+			if (res != HV_STATUS_SUCCESS)
+				report_abort("Failed to enable VTL1 for cpu%u: 0x%lx\n", vcpu->apicid, res);
+		}
+	}));
+
+	/* Enter VTL1 on all cpus and init per-cpu VTL1 context */
+	on_cpus(lambda(void, (void* unused) {
+		/* Verify VTL1 is enabled on this cpu */
+		union hv_register_vsm_vp_status vsm_vp_status;
+		vsm_vp_status.as_u64 = get_vp_register64(HV_REGISTER_VSM_VP_STATUS);
+		report(vsm_vp_status.enabled_vtl_set == 0b11, "VTL1 enabled on cpu%d", smp_id());
+
+		/* Enter VTL1 to finish init */
+		run_in_vtl1(init_vtl_vcpu_ctx);
+	}), NULL);
 }
 
 static void test_get_set_vp_registers_negative(bool fast)
@@ -670,6 +823,8 @@ int main(int ac, char **av)
 
 	test_vsm_enable_partition_vtl_negative();
 	test_vsm_enable_vp_vtl_negative();
+
+	init_vsm();
 
 summary:
 	return report_summary();
