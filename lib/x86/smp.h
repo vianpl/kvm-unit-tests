@@ -75,6 +75,8 @@ BUILD_PERCPU_OP(exception_rflags_rf);
 BUILD_PERCPU_OP(exception_error_code);
 BUILD_PERCPU_OP(apic_ops);
 
+#define IPI_VECTOR 0x20
+
 void smp_init(void);
 
 int cpu_count(void);

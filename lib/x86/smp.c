@@ -12,8 +12,6 @@
 #include "alloc_page.h"
 #include "asm/page.h"
 
-#define IPI_VECTOR 0x20
-
 typedef void (*ipi_function_type)(void *data);
 
 static struct spinlock ipi_lock;
