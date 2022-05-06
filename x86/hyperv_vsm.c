@@ -1,6 +1,7 @@
 #include "libcflat.h"
 #include "vm.h"
 #include "smp.h"
+#include "apic.h"
 #include "alloc_page.h"
 #include "hyperv.h"
 
@@ -14,6 +15,7 @@ struct hv_vtl_vcpu_ctx {
 struct hv_vcpu {
 	uint32_t apicid;
 	uint32_t vpid;
+	bool is_bsp;
 
 	/* Hypercall input/argument staging buffers */
 	void *input_page;
@@ -562,6 +564,7 @@ static void init_vcpu(void)
 	vcpu->active_vtl = 0;
 	vcpu->gs_base = rdmsr(MSR_GS_BASE);
 	vcpu->fs_base = rdmsr(MSR_FS_BASE);
+	vcpu->is_bsp = (rdmsr(MSR_IA32_APICBASE) & APIC_BSP) != 0;
 
 	/* Enable OSFXSR for XMM hypercall arguments */
 	write_cr4(read_cr4() | X86_CR4_OSFXSR);
@@ -587,6 +590,30 @@ static inline void init_vtl_partition_ctx(void)
 	vtl_offsets.as_u64 = get_vp_register64(HV_REGISTER_VSM_CODE_PAGE_OFFSETS);
 	vtl_partition_ctx()->vtl_call_va = vtl_partition_ctx()->hypercall_page + vtl_offsets.vtl_call_offset;
 	vtl_partition_ctx()->vtl_return_va = vtl_partition_ctx()->hypercall_page + vtl_offsets.vtl_return_offset;
+}
+
+static inline void init_vtl_x2apic(void)
+{
+	/* We expect VTL1 apics to be enabled, but in xapic mode and software-disabled. */
+	u64 apic_base = rdmsr(MSR_IA32_APICBASE);
+	if (!((apic_base & APIC_EN) && this_cpu_has(X86_FEATURE_APIC)))
+		report_abort("CPU%u: VTL1 apic should be hw-enabled", smp_id());
+
+	enable_x2apic();
+
+	/* BSP should still be BSP and APs should still not */
+	report(vp_self()->is_bsp == ((apic_base & APIC_BSP) != 0),
+		"CPU%u: VTL1 apic base BSP bit is correct", smp_id());
+
+	/* Check that apic id still matches VTL0 and cpuid value */
+	u32 apicid = apic_read(APIC_ID);
+	report(apicid == vp_self()->apicid && apicid == cpuid(0xb).d,
+		"CPU%u: APIC ID matches VTL0", smp_id());
+
+	/* Check that version is sane */
+	u8 version = (u8)apic_read(APIC_LVR);
+	report(version >= 0x10 && version <= 0x15,
+		"CPU%u: VTL1 apic base BSP bit is correct", smp_id());
 }
 
 static void init_vsm(void)
@@ -647,7 +674,10 @@ static void init_vsm(void)
 		report(vsm_vp_status.enabled_vtl_set == 0b11, "VTL1 enabled on cpu%d", smp_id());
 
 		/* Enter VTL1 to finish init */
-		run_in_vtl1(init_vtl_vcpu_ctx);
+		run_in_vtl1(lambda(void, (void) {
+			init_vtl_vcpu_ctx();
+			init_vtl_x2apic();
+		}));
 	}), NULL);
 }
 
