@@ -43,6 +43,7 @@ struct hv_vtl_partition_ctx
 	void *hypercall_page;
 	void *vtl_call_va;
 	void *vtl_return_va;
+	struct hv_reference_tsc_page *tsc_reference_page;
 };
 
 static struct hv_vcpu g_vcpus[MAX_CPUS];
@@ -613,6 +614,12 @@ static inline void init_vtl_partition_ctx(void)
 	vtl_offsets.as_u64 = get_vp_register64(HV_REGISTER_VSM_CODE_PAGE_OFFSETS);
 	vtl_partition_ctx()->vtl_call_va = vtl_partition_ctx()->hypercall_page + vtl_offsets.vtl_call_offset;
 	vtl_partition_ctx()->vtl_return_va = vtl_partition_ctx()->hypercall_page + vtl_offsets.vtl_return_offset;
+
+	vtl_partition_ctx()->tsc_reference_page = alloc_page();
+	if (!vtl_partition_ctx()->tsc_reference_page)
+		report_abort("Could not alloc tsc reference page");
+
+	wrmsr(HV_X64_MSR_REFERENCE_TSC, virt_to_phys(vtl_partition_ctx()->tsc_reference_page) | 0x1);
 }
 
 static inline void init_vtl_x2apic(void)
@@ -1050,6 +1057,22 @@ static void test_vtl_tlb_locking(void)
 	report(true, "VTL1 TLB locking");
 }
 
+/*
+ * Test that both VTLs have the same contents of tsc reference page.
+ * Actual semantics of tsc page are tested by hyperv_clock test. We will only check per-VTL part.
+ */
+static void test_per_vtl_tsc_reference_page(void)
+{
+	struct hv_reference_tsc_page *vtl0_tsc_ref = g_vtl_partition_ctx[0].tsc_reference_page;
+	for (size_t i = 1; i < HV_NUM_VTLS; ++i) {
+		struct hv_reference_tsc_page *tsc_ref = g_vtl_partition_ctx[i].tsc_reference_page;
+		report(	vtl0_tsc_ref->tsc_scale == tsc_ref->tsc_scale &&
+			vtl0_tsc_ref->tsc_offset == tsc_ref->tsc_offset &&
+			vtl0_tsc_ref->tsc_sequence == tsc_ref->tsc_sequence,
+			"Per-VTL TSC reference page values");
+	}
+}
+
 int main(int ac, char **av)
 {
 	/*
@@ -1099,6 +1122,8 @@ int main(int ac, char **av)
 
 	test_vtl_vp_isolation();
 	test_vtl_tlb_locking();
+
+	test_per_vtl_tsc_reference_page();
 
 summary:
 	return report_summary();
