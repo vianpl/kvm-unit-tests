@@ -1073,6 +1073,28 @@ static void test_per_vtl_tsc_reference_page(void)
 	}
 }
 
+/*
+ * Test that disabling VTL1 apic does not affect VTL0
+ */
+static void test_vtl1_apic_disable(void)
+{
+	/* Disable apic in VTL1 */
+	run_in_vtl1(lambda(void, (void) {
+		wrmsr(MSR_IA32_APICBASE, rdmsr(MSR_IA32_APICBASE) & ~(APIC_EN | APIC_EXTD));
+	}));
+
+	/* VTL0 apic still enabled */
+	report((rdmsr(MSR_IA32_APICBASE) & APIC_EN) && this_cpu_has(X86_FEATURE_APIC),
+	       "VTL0 apic is not affected by disabling VTL1 apic");
+
+	/* Re-enable VTL1 apic */
+	run_in_vtl1(lambda(void, (void) {
+		wrmsr(MSR_IA32_APICBASE, rdmsr(MSR_IA32_APICBASE) | APIC_EN);
+		wrmsr(MSR_IA32_APICBASE, rdmsr(MSR_IA32_APICBASE) | APIC_EXTD);
+		apic_write(APIC_SPIV, apic_read(APIC_SPIV) | APIC_SPIV_APIC_ENABLED);
+	}));
+}
+
 int main(int ac, char **av)
 {
 	/*
@@ -1124,6 +1146,8 @@ int main(int ac, char **av)
 	test_vtl_tlb_locking();
 
 	test_per_vtl_tsc_reference_page();
+
+	test_vtl1_apic_disable();
 
 summary:
 	return report_summary();
