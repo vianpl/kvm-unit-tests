@@ -820,6 +820,13 @@ static void test_vsm_enable_vp_vtl_negative(void)
 
 int main(int ac, char **av)
 {
+	/*
+	 * Warning on using vmalloc and passing pointers between VTLs.
+	 *
+	 * vmalloc modifies page tables, VTLs has their own page tables,
+	 * thus any changes made by vmalloc in VTL0 will not be carried over to VTL1.
+	 * As a result attempts to pass malloc/calloc-ed pointers between VTLs will result in a #PF.
+	 */
 	setup_vm();
 
 #if !defined(__x86_64__)
