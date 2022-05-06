@@ -330,6 +330,44 @@ static uint64_t hv_enable_vp_vtl(uint64_t partition_id,
 	return hc.result;
 }
 
+/*
+ * IRQ entry macro.
+ *
+ * We have our own custom IRQ entries because we can't use handle_irq cross-VTL
+ * because they rely on vmalloc pointers and those don't cross VTLs.
+ *
+ * We assume handler_func is following SysV x64 ABI and will preserve only scratch registers.
+ */
+#define VTL_IRQ_ENTRY(entry_name, handle_func) \
+    asm (                   \
+    #entry_name ":\n"       \
+        "push   %rax \n"    \
+        "push   %rdi \n"    \
+        "push   %rsi \n"    \
+        "push   %rdx \n"    \
+        "push   %rcx \n"    \
+        "push   %r8 \n"     \
+        "push   %r9 \n"     \
+        "push   %r10 \n"    \
+        "push   %r11 \n"    \
+        "call " #handle_func "\n" \
+        "pop    %r11 \n"    \
+        "pop    %r10 \n"    \
+        "pop    %r9 \n"     \
+        "pop    %r8 \n"     \
+        "pop    %rcx \n"    \
+        "pop    %rdx \n"    \
+        "pop    %rsi \n"    \
+        "pop    %rdi \n"    \
+        "pop    %rax \n"    \
+        "iretq \n"          \
+    );
+
+/* Reserved VTL IRQ vectors */
+enum {
+	VTL_IPI_VECTOR = IPI_VECTOR + 1,
+};
+
 __attribute__((used)) static void vtl_inc(void)
 {
 	set_active_vtl(get_active_vtl() + 1);
@@ -1095,6 +1133,102 @@ static void test_vtl1_apic_disable(void)
 	}));
 }
 
+/*
+ * Test IPI delivery between different VTLs
+ *
+ * The rule for cross-VTL IPI delivery is that IPI is targeted at VTL that matches sender active VTL, so:
+ * - If sender is in VTL0, IPI targets VTL0, and will not preempt VTL1
+ * - If sender is in VTL1, IPI targets VTL1, and will preempt VTL0
+ */
+
+static atomic_t g_ipi_count[HV_NUM_VTLS]; /* Per-VTL counts */
+
+static inline void wait_atomic(atomic_t* val, u32 expected)
+{
+	while (atomic_read(val) != expected)
+		pause();
+}
+
+static inline void reset_ipi_counts(void)
+{
+	for (size_t i = 0; i < HV_NUM_VTLS; i++)
+		atomic_set(g_ipi_count + i, 0);
+}
+
+VTL_IRQ_ENTRY(vtl_ipi_entry, vtl_ipi_handler);
+
+__attribute__((used)) static void vtl_ipi_handler(void)
+{
+	atomic_inc(&g_ipi_count[get_active_vtl()]);
+	apic_write(APIC_EOI, 0);
+}
+
+static void send_vtl_ipi(u32 target_cpu)
+{
+	apic_icr_write(APIC_INT_ASSERT | APIC_DEST_PHYSICAL | APIC_DM_FIXED | VTL_IPI_VECTOR,
+			id_map[target_cpu]);
+}
+
+static void test_vtl0_to_vtl0_ipi(u32 target_cpu)
+{
+	/* Send from VTL0, should be recv-ed by dest vcpu in VTL0 */
+	reset_ipi_counts();
+	send_vtl_ipi(target_cpu);
+	wait_atomic(&g_ipi_count[0], 1);
+	report(atomic_read(&g_ipi_count[0]) == 1 && atomic_read(&g_ipi_count[1]) == 0, "VTL0 to VTL0 IPI");
+}
+
+static void test_vtl1_to_vtl0_ipi(u32 target_cpu)
+{
+	/* Send from VTL1, should be recv-ed by dest vcpu in VTL1 without delay */
+	reset_ipi_counts();
+	run_in_vtl1(lambda(void, (void) { send_vtl_ipi(target_cpu); }));
+	wait_atomic(&g_ipi_count[1], 1);
+	report(atomic_read(&g_ipi_count[0]) == 0 && atomic_read(&g_ipi_count[1]) == 1, "VTL1 to VTL0 IPI");
+}
+
+static void test_vtl0_to_vtl1_ipi(u32 target_cpu)
+{
+	/* Send from VTL0 while dest is in VTL1.
+	 * IPI should only be acked when dest returns to VTL1, so we need extra machinery here */
+	reset_ipi_counts();
+	atomic_t ipi_sequence;
+	atomic_set(&ipi_sequence, 0);
+	on_cpu_async(target_cpu, (void*)run_in_vtl1, lambda(void, (void) {
+		/* Tell VTL0 we've reached VTL1 and wait for VTL0 to send an IPI */
+		atomic_inc(&ipi_sequence);
+		wait_atomic(&ipi_sequence, 2);
+
+		/* Make sure we haven't seen an IPI during some grace period until we return from VTL1,
+		 * e.g. KVM didn't preempt VTL1 to handle a VTL0 IPI */
+		delay(IPI_DELAY * cpu_count());
+		report(atomic_read(&g_ipi_count[1]) == 0, "VTL0 to VTL1 IPI");
+	}));
+
+	/* Wait until dest reaches VTL1 and send an IPI */
+	wait_atomic(&ipi_sequence, 1);
+	send_vtl_ipi(target_cpu);
+	atomic_inc(&ipi_sequence);
+
+	/* Wait until target vcpu exits VTL1 and handles its IPI in VTL0 */
+	wait_atomic(&g_ipi_count[0], 1);
+	report(atomic_read(&g_ipi_count[0]) == 1 && atomic_read(&g_ipi_count[1]) == 0, "VTL0 to VTL1 IPI");
+}
+
+static void test_cross_vtl_ipis(void)
+{
+	u32 target_cpu = 1;
+	assert(smp_id() == 0);
+
+	/* IDTR is shared between VTLs, so we can set it globally */
+	void vtl_ipi_entry(void);
+	set_idt_entry(VTL_IPI_VECTOR, vtl_ipi_entry, 0);
+
+	test_vtl0_to_vtl0_ipi(target_cpu);
+	test_vtl1_to_vtl0_ipi(target_cpu);
+	test_vtl0_to_vtl1_ipi(target_cpu);
+}
+
 int main(int ac, char **av)
 {
 	/*
@@ -1148,6 +1282,7 @@ int main(int ac, char **av)
 	test_per_vtl_tsc_reference_page();
 
 	test_vtl1_apic_disable();
+	test_cross_vtl_ipis();
 
 summary:
 	return report_summary();
