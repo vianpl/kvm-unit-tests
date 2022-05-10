@@ -369,6 +369,8 @@ static uint64_t hv_enable_vp_vtl(uint64_t partition_id,
 enum {
 	VTL_IPI_VECTOR = IPI_VECTOR + 1,
 	VTL_LVTT_VECTOR,
+	VTL_SINT0_VECTOR,
+	VTL_SINT1_VECTOR,
 };
 
 __attribute__((used)) static void vtl_inc(void)
@@ -1332,6 +1334,120 @@ static void test_vtl_local_timer(void)
 	cli();
 }
 
+/*
+ * Test per-VTL synic timers.
+ * They should follow the same idea as local per-VTL apic timers do:
+ * - When an stimer fires for a VTL1 synic and cpu is in VTL0, immediate VTL switch should be forced
+ * - When an stimer fires for a VTL0 synic and cpu is in VTL1, event is not injected until return to VTL0
+ */
+
+VTL_IRQ_ENTRY(vtl_sint1_entry, vtl_stimer0_handler);
+
+__attribute__((used)) static void vtl_stimer0_handler(void)
+{
+	if (!(rdmsr(HV_X64_MSR_STIMER0_CONFIG) & HV_STIMER_DIRECT_MODE)) {
+		struct hv_message *msg = &vtl_vcpu_ctx()->synic_msg_page->sint_message[1];
+		assert(msg->header.message_type == HVMSG_TIMER_EXPIRED);
+
+		/* We should never see pending messages, because all our timers are one-shot */
+		assert(!msg->header.message_flags.msg_pending);
+		msg->header.message_type = HVMSG_NONE;
+		wmb();
+	}
+
+	apic_write(APIC_EOI, 0);
+	g_timer_tscs[get_active_vtl()] = rdtsc();
+	atomic_inc(&g_timers_seen);
+}
+
+static void setup_oneshot_stimer(int timer_idx, int sint, u8 vec, bool direct)
+{
+	u64 config = HV_STIMER_AUTOENABLE;
+
+	if (direct) {
+		config |= ((u64)vec << 4) | HV_STIMER_DIRECT_MODE;
+	} else {
+		config |= ((u64)sint << 16);
+		wrmsr(HV_X64_MSR_SINT0 + sint, vec);
+	}
+
+	wrmsr(HV_X64_MSR_STIMER0_CONFIG + timer_idx, config);
+}
+
+/* Count is in 100-nanosecond units */
+static void arm_oneshot_stimer(int idx, u64 count)
+{
+	wrmsr(HV_X64_MSR_STIMER0_COUNT + idx, count);
+}
+
+static void vtl1_stimer_test(void)
+{
+	memset(g_timer_tscs, 0, sizeof(g_timer_tscs));
+	atomic_set(&g_timers_seen, 0);
+
+	u64 ref_tsc = rdmsr(HV_X64_MSR_TIME_REF_COUNT);
+	u64 increment = DEFAULT_TEST_TIMER_PERIOD / 100; /* 100-ns units */
+
+	/* Arm stimer in VTL1 and return back */
+	run_in_vtl1(lambda(void, (void) { arm_oneshot_stimer(0, ref_tsc + increment); }));
+
+	/* Arm another time in VTL0 for twice the period of VTL1 */
+	arm_oneshot_stimer(0, ref_tsc + increment * 2);
+	wait_atomic(&g_timers_seen, 2);
+
+	/* Expect to first see VTL1 timer firing followed by VTL0 */
+	report(g_timer_tscs[0] > g_timer_tscs[1],
+		"VTL1 stimer forces VTL entry (VTL0 tsc %lu > VTL1 tsc %lu)",
+		g_timer_tscs[0], g_timer_tscs[1]);
+}
+
+static void vtl0_stimer_test(void)
+{
+	memset(g_timer_tscs, 0, sizeof(g_timer_tscs));
+	atomic_set(&g_timers_seen, 0);
+
+	u64 ref_tsc = rdmsr(HV_X64_MSR_TIME_REF_COUNT);
+	u64 increment = DEFAULT_TEST_TIMER_PERIOD / 100; /* 100-ns units */
+
+	/* Arm stimer in VTL0 */
+	arm_oneshot_stimer(0, ref_tsc + increment);
+
+	/* Enter VTL1, arm another stimer with twice the period and stay in VTL1 until it fires */
+	run_in_vtl1(lambda(void, (void) {
+		arm_oneshot_stimer(0, ref_tsc + increment * 2);
+		wait_atomic(&g_timers_seen, 1);
+	}));
+
+	/* Upon return to VTL0 first stimer should be delivered */
+	wait_atomic(&g_timers_seen, 2);
+
+	/* Expect to first see VTL1 stimer firing followed by VTL0 */
+	report(g_timer_tscs[0] > g_timer_tscs[1],
+		"VTL0 stimer is injected on return to VTL1 (VTL0 tsc %lu > VTL1 tsc %lu)",
+		g_timer_tscs[0], g_timer_tscs[1]);
+}
+
+static void test_vtl_stimers_common(bool direct)
+{
+	void vtl_sint1_entry(void);
+	set_idt_entry(VTL_SINT1_VECTOR, vtl_sint1_entry, 0);
+
+	/* Configure timers in both VTLs */
+	setup_oneshot_stimer(0, 1, VTL_SINT1_VECTOR, direct);
+	run_in_vtl1(lambda(void, (void) { setup_oneshot_stimer(0, 1, VTL_SINT1_VECTOR, direct); }));
+
+	sti();
+	vtl1_stimer_test();
+	vtl0_stimer_test();
+	cli();
+}
+
+static void test_vtl_stimers(void)
+{
+	test_vtl_stimers_common(false);
+	test_vtl_stimers_common(true);
+}
+
 int main(int ac, char **av)
 {
 	/*
@@ -1393,6 +1509,7 @@ int main(int ac, char **av)
 	test_vtl1_apic_disable();
 	test_cross_vtl_ipis();
 	test_vtl_local_timer();
+	test_vtl_stimers();
 
 summary:
 	return report_summary();
