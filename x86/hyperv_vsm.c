@@ -332,6 +332,46 @@ static uint64_t hv_enable_vp_vtl(uint64_t partition_id,
 	return hc.result;
 }
 
+static uint64_t hv_modify_vtl_protection_mask(uint64_t partition_id,
+					      union hv_input_vtl vtl,
+					      uint32_t prot_mask,
+					      size_t num_gfns,
+					      const uint64_t *gfn_list)
+{
+	struct hv_modify_vtl_protection_mask args;
+	args.target_partition_id = partition_id;
+	args.map_flags = prot_mask;
+	args.input_vtl = vtl;
+
+	struct hyperv_hypercall_thunk hc = {0};
+	hc.fast = true;
+	hc.code = HVCALL_MODIFY_VTL_PROTECTION_MASK;
+	hc.rep_cnt = num_gfns;
+	hc.rep_idx = 0;
+
+	if (num_gfns > 12) {
+		report_abort("Cannot fit %zu gfns in XMM call:", num_gfns);
+	}
+
+	hc.arg1 = ((uint64_t*)&args)[0];
+	hc.arg2 = ((uint64_t*)&args)[1];
+
+	/* 2 GPAs per XMM reg */
+	uint64_t* dst64 = (uint64_t*)(&hc.xmm[0]);
+	for (size_t i = 0; i < num_gfns; ++i) {
+		dst64[i] = gfn_list[i];
+	}
+
+	while (hc.rep_idx < hc.rep_cnt) {
+		do_hypercall(&hc);
+		if (hc.result != HV_STATUS_SUCCESS) {
+			return hc.result;
+		}
+	}
+
+	return HV_STATUS_SUCCESS;
+}
+
 /*
  * IRQ entry macro.
  *
@@ -738,7 +778,14 @@ static void init_vsm(void)
 	}), NULL);
 
 	/* Use this cpu to init partition-wide VTL1 context */
-	run_in_vtl1(init_vtl_partition_ctx);
+	run_in_vtl1(lambda(void, (void) {
+		init_vtl_partition_ctx();
+
+		union hv_register_vsm_partition_config vsm_partition_config = {0};
+		vsm_partition_config.enable_vtl_protection = 1;
+		vsm_partition_config.default_vtl_protection_mask = HV_DEFAULT_VTL_PROT_MASK;
+		set_vp_register64(HV_REGISTER_VSM_PARTITION_CONFIG, vsm_partition_config.as_u64);
+	}));
 
 	/* Enter VTL1 on this CPU and enable VTL1 for real on other CPUs */
 	run_in_vtl1(lambda(void, (void) {
@@ -1448,6 +1495,236 @@ static void test_vtl_stimers(void)
 	test_vtl_stimers_common(true);
 }
 
+
+/*
+ * TLFS: A higher VTL can set a different default memory protection policy by specifying
+ *       DefaultVtlProtectionMask in HV_REGISTER_VSM_PARTITION_CONFIG. This mask must be set at the time
+ *       the VTL is enabled. It cannot be changed once it is set, and is only cleared by a partition reset.
+ *
+ * Since VTL is already enabled with (RWX mask), check that modifying it has not effect.
+ */
+static void test_default_protection_mask(void)
+{
+	void *test_page = alloc_page();
+	if (!test_page)
+		report_abort("Could not allocate a test page");
+
+	/* VTL1 will try to remove default read access globally for VTL0 */
+	run_in_vtl1(lambda(void, (void) {
+		union hv_register_vsm_partition_config vsm_partition_config;
+
+		vsm_partition_config.as_u64 = get_vp_register64(HV_REGISTER_VSM_PARTITION_CONFIG);
+		report(
+			vsm_partition_config.default_vtl_protection_mask == HV_DEFAULT_VTL_PROT_MASK,
+			"Default VTL protection mask is as expected"
+		);
+
+		/* Try to change default protections, shouldn't work */
+		vsm_partition_config.default_vtl_protection_mask &= ~HV_DEFAULT_VTL_PROT_MASK;
+		set_vp_register64(HV_REGISTER_VSM_PARTITION_CONFIG, vsm_partition_config.as_u64);
+		vsm_partition_config.as_u64 = get_vp_register64(HV_REGISTER_VSM_PARTITION_CONFIG);
+		report(
+			vsm_partition_config.default_vtl_protection_mask == HV_DEFAULT_VTL_PROT_MASK,
+			"Default VTL protection mask is still as expected"
+		);
+	}));
+
+	/* Make sure we can still read from the test page which means default protection change
+	 * really had no effect */
+	READ_ONCE(*(u64*)test_page);
+	free_page(test_page);
+	report(true, "Default VTL protection mask not changed");
+}
+
+static atomic_t g_intercepts_seen;
+static struct hv_memory_intercept_message g_last_intercept_msg;
+
+VTL_IRQ_ENTRY(vtl_sint0_entry, vtl_sint0_handler);
+
+__attribute__((used)) static void vtl_sint0_handler(void)
+{
+	uint64_t res;
+	struct hv_message *msg = &vtl_vcpu_ctx()->synic_msg_page->sint_message[0];
+	struct hv_memory_intercept_message *intercept = (struct hv_memory_intercept_message *)msg->u.payload;
+
+	if (msg->header.message_type != HVMSG_GPA_INTERCEPT)
+		report_abort("Unexpected message type 0x%x", msg->header.message_type);
+
+	/* Drop the protection to let the access be retried */
+	u64 gfn = intercept->gpa >> PAGE_SHIFT;
+	res = hv_modify_vtl_protection_mask(HV_PARTITION_ID_SELF,
+					    HV_INPUT_VTL(0),
+					    HV_VTL_PROT_READ | HV_VTL_PROT_WRITE,
+					    1,
+					    &gfn);
+	if (res != HV_STATUS_SUCCESS)
+		report_abort("HvModifyVtlProtectionMask(0x%lx) hypercall failed with %lu\n",
+			     intercept->gpa, res);
+
+	/* Save the message for VTL0 to inspect */
+	memcpy(&g_last_intercept_msg, intercept, sizeof(*intercept));
+	atomic_inc(&g_intercepts_seen);
+
+	msg->header.message_type = HVMSG_NONE;
+	wmb();
+
+	apic_write(APIC_EOI, 0);
+}
+
+static void get_segment(u8 sel, struct hv_x64_segment_register* seg)
+{
+	gdt_entry_t* entry = &gdt[sel / sizeof(*entry)];
+	seg->base = get_gdt_entry_base(entry);
+	seg->limit = get_gdt_entry_limit(entry);
+	seg->selector = sel;
+	seg->attributes = entry->type_limit_flags;
+	seg->reserved = 0;
+}
+
+/*
+ * Test explicitly set per-GPA protections.
+ */
+static void test_gpa_protection_mask(void)
+{
+	void *test_page = alloc_page();
+	if (!test_page)
+		report_abort("Could not allocate test page");
+
+	/* Set things up for VTL1 intercept handler */
+	atomic_set(&g_intercepts_seen, 0);
+	run_in_vtl1(lambda(void, (void) {
+		void vtl_sint0_entry(void);
+		set_idt_entry(VTL_SINT0_VECTOR, vtl_sint0_entry, 0);
+		wrmsr(HV_X64_MSR_SINT0, VTL_SINT0_VECTOR);
+	}));
+
+	/* Rewoke all access to test page for VTL0 */
+	run_in_vtl1(lambda(void, (void) {
+		u64 res;
+		u64 gfn = virt_to_phys(test_page) >> PAGE_SHIFT;
+		res = hv_modify_vtl_protection_mask(HV_PARTITION_ID_SELF,
+						    HV_INPUT_VTL(0),
+						    0,
+						    1,
+						    &gfn);
+		if (res != HV_STATUS_SUCCESS)
+			report_abort("HvModifyVtlProtectionMask(0x%lx) hypercall failed with %lu\n", gfn, res);
+	}));
+
+	/* Fill out a template of an intercept message we expect */
+	struct hv_memory_intercept_message expected_msg = {
+		.header = {
+			.vp_index = vp_self()->vpid,
+			.exec_state = {
+				.cpl = 0,
+				.cr0_pe = read_cr0() & X86_CR0_PE,
+				.cr0_am = read_cr0() & X86_CR0_AM,
+				.efer_lma = rdmsr(MSR_EFER) & EFER_LMA,
+				.debug_active = 0,
+				.interruption_pending = 0,
+			},
+		},
+		.cache_type = HV_X64_CACHE_TYPE_WRITEBACK,
+		.memory_access_info = {
+			.gva_valid = 0,
+		},
+		.gva = 0,
+		.gpa = virt_to_phys(test_page),
+	};
+
+	get_segment(read_cs(), &expected_msg.header.cs);
+	get_segment(read_ds(), &expected_msg.ds);
+	get_segment(read_ss(), &expected_msg.ss);
+
+	#define DO_ACCESS_FAULT(access_op)				\
+	asm volatile (							\
+		/* Fill the remaining intercept message */		\
+		"lea	%[expected_msg], %%rbx \n\r"			\
+		"lea	(1f), %%rax \n\r"				\
+		"mov	%%rax, 0x18(%%rbx) \n\r" /* header.rip */	\
+		"mov	%%rcx, 0x78(%%rbx) \n\r" /* rcx */		\
+		"mov	%%rdx, 0x80(%%rbx) \n\r" /* rdx */		\
+		"mov	%%rbx, 0x88(%%rbx) \n\r" /* rbx */		\
+		"mov	%%rsp, 0x90(%%rbx) \n\r" /* rsp */		\
+		"mov	%%rbp, 0x98(%%rbx) \n\r" /* rbp */		\
+		"mov	%%rsi, 0xa0(%%rbx) \n\r" /* rsi */		\
+		"mov	%%rdi, 0xa8(%%rbx) \n\r" /* rdi */		\
+		"mov	%%r8,  0xb0(%%rbx) \n\r" /* r8 */		\
+		"mov	%%r9,  0xb8(%%rbx) \n\r" /* r9 */		\
+		"mov	%%r10, 0xc0(%%rbx) \n\r" /* r10 */		\
+		"mov	%%r11, 0xc8(%%rbx) \n\r" /* r11 */		\
+		"mov	%%r12, 0xd0(%%rbx) \n\r" /* r12 */		\
+		"mov	%%r13, 0xd8(%%rbx) \n\r" /* r13 */		\
+		"mov	%%r14, 0xe0(%%rbx) \n\r" /* r14 */		\
+		"mov	%%r15, 0xe8(%%rbx) \n\r" /* r15 */		\
+									\
+		/* do the access to test page */			\
+		"mov	%[test_page], %%rax \n\r"			\
+		"mov	%%rax, 0x70(%%rbx) \n\r" /* rax */		\
+		"1: " access_op "\n\r" 					\
+									\
+		/* handle rflags after the access is retired
+		 * to get the effective value seen by the intercept */  \
+		"pushfq \n\r"						\
+		"pop	%%rax \n\r"					\
+		"or	$0x10000, %%rax \n\r"	 /* restore RF */	\
+		"mov	%%rax, 0x20(%%rbx) \n\r" /* header.rflags */	\
+		:[expected_msg] "=m"(expected_msg)			\
+		:[test_page] "m"(test_page)				\
+		:"memory", "rax", "rbx");				\
+
+	/* Try reading from the page and expect an intercept message in response.
+	 * Inline assembly is required to record faulting read instruction address */
+	expected_msg.header.access_type_mask = HV_INTERCEPT_ACCESS_READ;
+	expected_msg.header.instruction_length = 3;
+	expected_msg.instruction_byte_count = 3;
+	expected_msg.instruction_bytes[0] = 0x48;
+	expected_msg.instruction_bytes[1] = 0x8b;
+	expected_msg.instruction_bytes[2] = 0x00;
+	DO_ACCESS_FAULT("mov (%%rax), %%rax");
+
+	report(0 == memcmp(&expected_msg, &g_last_intercept_msg, sizeof(expected_msg)),
+	       "Seen an expected read intercept message");
+
+	/* Rewoke write access to test page for VTL0 */
+	run_in_vtl1(lambda(void, (void) {
+		u64 res;
+		u64 gfn = virt_to_phys(test_page) >> PAGE_SHIFT;
+		res = hv_modify_vtl_protection_mask(HV_PARTITION_ID_SELF,
+						    HV_INPUT_VTL(0),
+						    HV_VTL_PROT_READ,
+						    1,
+						    &gfn);
+		if (res != HV_STATUS_SUCCESS)
+			report_abort("HvModifyVtlProtectionMask(0x%lx) hypercall failed with %lu\n", gfn, res);
+	}));
+
+	/* Try writing to the page now */
+	expected_msg.header.access_type_mask = HV_INTERCEPT_ACCESS_WRITE;
+	expected_msg.header.instruction_length = 3;
+	expected_msg.instruction_byte_count = 3;
+	expected_msg.instruction_bytes[0] = 0x48;
+	expected_msg.instruction_bytes[1] = 0x89;
+	expected_msg.instruction_bytes[2] = 0x00;
+	DO_ACCESS_FAULT("mov %%rax, (%%rax)");
+
+	report(0 == memcmp(&expected_msg, &g_last_intercept_msg, sizeof(expected_msg)),
+	       "Seen an expected write intercept message");
+
+	#undef DO_ACCESS_FAULT
+	free_page(test_page);
+}
+
+/*
+ *  * Test that protecting VTL1 pages works.
+ *   */
+
+static void test_vtl_memory_protection(void)
+{
+	test_default_protection_mask();
+	test_gpa_protection_mask();
+}
+
 int main(int ac, char **av)
 {
 	/*
@@ -1510,6 +1787,8 @@ int main(int ac, char **av)
 	test_cross_vtl_ipis();
 	test_vtl_local_timer();
 	test_vtl_stimers();
+
+	test_vtl_memory_protection();
 
 summary:
 	return report_summary();
