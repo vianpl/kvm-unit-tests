@@ -226,6 +226,7 @@ struct hv_event_flags_page {
 #define HV_HYPERCALL_FAST               (1u << 16)
 
 #define HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE      0x02
+#define HVCALL_MODIFY_VTL_PROTECTION_MASK       0x0c
 #define HVCALL_ENABLE_PARTITION_VTL             0x0d
 #define HVCALL_ENABLE_VP_VTL                    0x0f
 #define HVCALL_GET_VP_REGISTERS                 0x50
@@ -485,10 +486,96 @@ struct hv_enable_vp_vtl {
         struct hv_initial_vp_context vp_vtl_context;
 } __attribute__((packed));
 
+/* VTL per-GPA protection bits */
+#define HV_VTL_PROT_READ BIT(0)
+#define HV_VTL_PROT_WRITE BIT(1)
+#define HV_VTL_PROT_EXEC BIT(3)
+
+/* PROT_EXEC is split into 2 when MBEC is enabled */
+#define HV_VTL_PROT_UMX BIT(2)
+#define HV_VTL_PROT_KMX BIT(3)
+
+#define HV_DEFAULT_VTL_PROT_MASK (HV_VTL_PROT_READ | HV_VTL_PROT_WRITE | HV_VTL_PROT_EXEC)
+
+struct hv_modify_vtl_protection_mask {
+        uint64_t target_partition_id;
+        uint32_t map_flags;
+        union hv_input_vtl input_vtl;
+        uint8_t reserved[3];
+} __attribute__((packed));
+
+/* Intecept message header */
+struct hv_intercept_header {
+        uint32_t vp_index;
+        uint8_t instruction_length;
+#define HV_INTERCEPT_ACCESS_READ    0
+#define HV_INTERCEPT_ACCESS_WRITE   1
+#define HV_INTERCEPT_ACCESS_EXECUTE 2
+        uint8_t access_type_mask;
+        union {
+                uint16_t as_u16;
+                struct {
+                        uint16_t cpl:2;
+                        uint16_t cr0_pe:1;
+                        uint16_t cr0_am:1;
+                        uint16_t efer_lma:1;
+                        uint16_t debug_active:1;
+                        uint16_t interruption_pending:1;
+                        uint16_t reserved:9;
+                };
+        } exec_state;
+        struct hv_x64_segment_register cs;
+        uint64_t rip;
+        uint64_t rflags;
+} __attribute__((packed));
+
+union hv_x64_memory_access_info {
+	uint8_t as_u8;
+	struct {
+		uint8_t gva_valid:1;
+		uint8_t _reserved:7;
+	};
+};
+
+struct hv_memory_intercept_message {
+	struct hv_intercept_header header;
+#define HV_X64_CACHE_TYPE_UNCACHED       0
+#define HV_X64_CACHE_TYPE_WRITECOMBINING 1
+#define HV_X64_CACHE_TYPE_WRITETHROUGH   4
+#define HV_X64_CACHE_TYPE_WRITEPROTECTED 5
+#define HV_X64_CACHE_TYPE_WRITEBACK      6
+	uint32_t cache_type;
+	uint8_t instruction_byte_count;
+	union hv_x64_memory_access_info memory_access_info;
+	uint16_t _reserved;
+	uint64_t gva;
+	uint64_t gpa;
+	uint8_t instruction_bytes[16];
+	struct hv_x64_segment_register ds;
+	struct hv_x64_segment_register ss;
+	uint64_t rax;
+	uint64_t rcx;
+	uint64_t rdx;
+	uint64_t rbx;
+	uint64_t rsp;
+	uint64_t rbp;
+	uint64_t rsi;
+	uint64_t rdi;
+	uint64_t r8;
+	uint64_t r9;
+	uint64_t r10;
+	uint64_t r11;
+	uint64_t r12;
+	uint64_t r13;
+	uint64_t r14;
+	uint64_t r15;
+} __attribute__((packed));
+
 #define HV_REGISTER_VSM_CODE_PAGE_OFFSETS       0x000D0002
 #define HV_REGISTER_VSM_VP_STATUS               0x000D0003
 #define HV_REGISTER_VSM_PARTITION_STATUS        0x000D0004
 #define HV_REGISTER_VSM_CAPABILITIES            0x000D0006
+#define HV_REGISTER_VSM_PARTITION_CONFIG        0x000D0007
 #define HV_REGISTER_VSM_VP_SECURE_CONFIG_VTL0   0x000D0010
 
 /* VTL call/return hypercall page offsets register */
@@ -532,6 +619,20 @@ union hv_register_vsm_capabilities {
                 uint64_t deny_lower_vtl_startup:1;
                 uint64_t mbec_vtl_mask:16;
                 uint64_t dr6_shared:1;
+        } __attribute__((packed));
+};
+
+
+union hv_register_vsm_partition_config {
+        uint64_t as_u64;
+        struct {
+                uint64_t enable_vtl_protection:1;
+                uint64_t default_vtl_protection_mask:4;
+                uint64_t zero_memory_on_reset:1;
+                uint64_t deny_lower_vtl_startup:1;
+                uint64_t reserved0:2;
+                uint64_t intercept_vp_startup:1;
+                uint64_t reserved1:54;
         } __attribute__((packed));
 };
 
