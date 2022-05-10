@@ -12,6 +12,8 @@
 /* Per-VTL/per-VCPU context */
 struct hv_vtl_vcpu_ctx {
 	struct hv_vp_assist_page *vp_assist_page;
+	struct hv_message_page *synic_msg_page;
+	struct hv_event_flags_page *synic_evt_page;
 };
 
 struct hv_vcpu {
@@ -611,6 +613,20 @@ static u64 enable_vp_vtl(void *cr3, struct hv_vcpu* target_vcpu)
 	return hv_enable_vp_vtl(HV_PARTITION_ID_SELF, target_vcpu->vpid, 1, &ctx);
 }
 
+static void init_vtl_synic(void)
+{
+	struct hv_vtl_vcpu_ctx *vtl = vtl_vcpu_ctx();
+
+	vtl->synic_msg_page = alloc_page();
+	vtl->synic_evt_page = alloc_page();
+	if (!vtl->synic_msg_page || !vtl->synic_evt_page)
+		report_abort("Failed to allocate synic message/event pages");
+
+	wrmsr(HV_X64_MSR_SIMP, virt_to_phys(vtl->synic_msg_page) | 0x1);
+	wrmsr(HV_X64_MSR_SIEFP, virt_to_phys(vtl->synic_evt_page) | 0x1);
+	wrmsr(HV_X64_MSR_SCONTROL, HV_SYNIC_CONTROL_ENABLE);
+}
+
 static void init_vcpu(void)
 {
 	uint32_t apicid = smp_id();
@@ -746,6 +762,7 @@ static void init_vsm(void)
 		run_in_vtl1(lambda(void, (void) {
 			init_vtl_vcpu_ctx();
 			init_vtl_x2apic();
+			init_vtl_synic();
 		}));
 	}), NULL);
 }
@@ -1345,10 +1362,16 @@ int main(int ac, char **av)
 		goto summary;
 	}
 
+	if (!synic_supported() || !stimer_supported()) {
+		report(true, "Hyper-V SynIC and/or stimers are not supported");
+		goto summary;
+	}
+
 	/* Setup VTL0 first */
 	on_cpus(lambda(void, (void *arg) {
 		init_vcpu();
 		init_vtl_vcpu_ctx();
+		init_vtl_synic();
 	}), NULL);
 	init_vtl_partition_ctx();
 
