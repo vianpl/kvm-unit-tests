@@ -14,6 +14,9 @@
 
 static atomic_t isr_enter_count[MAX_CPUS];
 
+/* Maps smp_id -> vp index */
+static uint32_t vp_index_map[MAX_CPUS];
+
 static void synic_sint_auto_eoi_isr(isr_regs_t *regs)
 {
     atomic_inc(&isr_enter_count[smp_id()]);
@@ -100,6 +103,7 @@ static void synic_test_prepare(void *ctx)
             HV_SYNIC_SIEFP_ENABLE);
     wrmsr(HV_X64_MSR_SCONTROL, HV_SYNIC_CONTROL_ENABLE);
 
+    vp_index_map[smp_id()] = rdmsr(HV_X64_MSR_VP_INDEX) & 0xFFFFFFFF;
     synic_sints_prepare(smp_id());
 }
 
@@ -109,7 +113,7 @@ static void synic_sints_test(int dst_vcpu)
 
     atomic_set(&isr_enter_count[dst_vcpu], 0);
     for (i = 0; i < HV_SYNIC_SINT_COUNT; i++) {
-        synic_sint_set(dst_vcpu, i);
+        synic_sint_set(vp_index_map[dst_vcpu], i);
     }
 
     while (atomic_read(&isr_enter_count[dst_vcpu]) != HV_SYNIC_SINT_COUNT) {
@@ -160,8 +164,10 @@ int main(int ac, char **av)
         on_cpus(synic_test_prepare, (void *)read_cr3());
 
         for (i = 0; i < ncpus; i++) {
-            printf("test %d -> %d\n", i, ncpus - 1 - i);
-            on_cpu_async(i, synic_test, (void *)(ulong)(ncpus - 1 - i));
+            int dst_cpu = ncpus - 1 - i;
+            printf("test %d (vp index %d) -> %d (vp index %d)\n",
+                    i, vp_index_map[i], dst_cpu, vp_index_map[dst_cpu]);
+            on_cpu_async(i, synic_test, (void *)(ulong)(dst_cpu));
         }
         while (cpus_active() > 1)
             pause();
