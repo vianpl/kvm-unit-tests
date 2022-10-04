@@ -26,6 +26,7 @@ typedef enum trigger_mode {
 	TRIGGER_MAX,
 } trigger_mode_t;
 
+void reset_pic(void);
 void mask_pic_interrupts(void);
 
 void eoi(void);

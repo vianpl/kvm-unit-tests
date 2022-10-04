@@ -110,7 +110,7 @@ start32:
 	setup_tr_and_percpu
 	call reset_apic
 	call save_id
-	call mask_pic_interrupts
+	call reset_pic
 	call enable_apic
 	call bringup_aps
 	call enable_x2apic

@@ -107,7 +107,7 @@ start64:
 	call load_idt
 	load_tss
 	call reset_apic
-	call mask_pic_interrupts
+	call reset_pic
 	call enable_apic
 	call save_id
 	mov mb_boot_info(%rip), %rbx

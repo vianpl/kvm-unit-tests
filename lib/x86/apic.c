@@ -5,6 +5,11 @@
 #include "smp.h"
 #include "asm/barrier.h"
 
+#define PORT_PIC1_CMD          0x0020
+#define PORT_PIC1_DATA         0x0021
+#define PORT_PIC2_CMD          0x00a0
+#define PORT_PIC2_DATA         0x00a1
+
 /* xAPIC and I/O APIC are identify mapped, and never relocated. */
 static void *g_apic = (void *)APIC_DEFAULT_PHYS_BASE;
 static void *g_ioapic = (void *)IO_APIC_DEFAULT_PHYS_BASE;
@@ -239,6 +244,25 @@ void enable_apic(void)
 {
 	printf("enabling apic\n");
 	xapic_write(APIC_SPIV, 0x1ff);
+}
+
+void reset_pic(void)
+{
+	/* Send ICW1 (select OCW1 + will send ICW4) */
+	outb(0x11, PORT_PIC1_CMD);
+	outb(0x11, PORT_PIC2_CMD);
+	/* Send ICW2 (base irqs: 0x08-0x0f for irq0-7, 0x70-0x77 for irq8-15) */
+	outb(0x08, PORT_PIC1_DATA);
+	outb(0x70, PORT_PIC2_DATA);
+	/* Send ICW3 (cascaded pic ids) */
+	outb(0x04, PORT_PIC1_DATA);
+	outb(0x02, PORT_PIC2_DATA);
+	/* Send ICW4 (enable 8086 mode) */
+	outb(0x01, PORT_PIC1_DATA);
+	outb(0x01, PORT_PIC2_DATA);
+	/* mask all irqs */
+	outb(0xff, 0x21);
+	outb(0xff, 0xa1);
 }
 
 void mask_pic_interrupts(void)
