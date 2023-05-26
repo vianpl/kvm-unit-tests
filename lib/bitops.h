@@ -95,7 +95,7 @@ static inline unsigned int get_order(size_t size)
 
 static inline void *align_ptr_up(void *p, size_t bsize)
 {
-    return (void*) ALIGN_UP((uintptr_t)p, bsize);
+    return (void*) ALIGN_UP((size_t)p, bsize);
 }
 
 #endif
