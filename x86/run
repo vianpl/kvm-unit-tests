@@ -36,12 +36,12 @@ else
 	pc_testdev="-device testdev,chardev=testlog -chardev file,id=testlog,path=msr.out"
 fi
 
-command="${qemu} --no-reboot -nodefaults $pc_testdev -vnc none -serial stdio $pci_testdev"
+command="${qemu} --trace hyperv_* --trace kvm_* -L / --no-reboot -nodefaults $pc_testdev -vnc none -serial stdio $pci_testdev"
 command+=" -machine accel=$ACCEL$ACCEL_PROPS"
 if [ "${CONFIG_EFI}" != y ]; then
 	command+=" -kernel"
 fi
-command="$(timeout_cmd) $command"
+command="gdb --args $command"
 
 if [ "${CONFIG_EFI}" = y ]; then
 	# Set ENVIRON_DEFAULT=n to remove '-initrd' flag for QEMU (see
@@ -51,5 +51,5 @@ if [ "${CONFIG_EFI}" = y ]; then
 	# gets '-initrd' without a '-kernel'
 	ENVIRON_DEFAULT=n run_qemu ${command} "$@"
 else
-	run_qemu ${command} "$@"
+	${command} "$@"
 fi
