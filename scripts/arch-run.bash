@@ -105,7 +105,7 @@ timeout_cmd ()
 				TIMEOUT="${TIMEOUT}s"
 			fi
 		fi
-		echo "timeout -k 1s --foreground $TIMEOUT"
+		echo "timeout -k 1s $TIMEOUT"
 	fi
 }
 
