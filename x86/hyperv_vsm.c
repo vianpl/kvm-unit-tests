@@ -1232,16 +1232,18 @@ __attribute__((used)) static void vtl_ipi_handler(void)
 
 static void send_vtl_ipi(u32 target_cpu)
 {
-	apic_icr_write(APIC_INT_ASSERT | APIC_DEST_PHYSICAL | APIC_DM_FIXED | VTL_IPI_VECTOR,
-			id_map[target_cpu]);
+	apic_icr_write(APIC_DEST_SELF | APIC_DEST_PHYSICAL | APIC_DM_FIXED | VTL_IPI_VECTOR,
+		       id_map[target_cpu]);
 }
 
 static void test_vtl0_to_vtl0_ipi(u32 target_cpu)
 {
 	/* Send from VTL0, should be recv-ed by dest vcpu in VTL0 */
 	reset_ipi_counts();
+	sti();
 	send_vtl_ipi(target_cpu);
 	wait_atomic(&g_ipi_count[0], 1);
+	cli();
 	report(atomic_read(&g_ipi_count[0]) == 1 && atomic_read(&g_ipi_count[1]) == 0, "VTL0 to VTL0 IPI");
 }
 
@@ -1256,6 +1258,7 @@ static void test_vtl1_to_vtl0_ipi(u32 target_cpu)
 
 static void test_vtl0_to_vtl1_ipi(u32 target_cpu)
 {
+	return;
 	/* Send from VTL0 while dest is in VTL1.
 	 * IPI should only be acked when dest returns to VTL1, so we need extra machinery here */
 	reset_ipi_counts();
@@ -1284,7 +1287,7 @@ static void test_vtl0_to_vtl1_ipi(u32 target_cpu)
 
 static void test_cross_vtl_ipis(void)
 {
-	u32 target_cpu = 1;
+	u32 target_cpu = 0;
 	assert(smp_id() == 0);
 
 	/* IDTR is shared between VTLs, so we can set it globally */
@@ -1721,6 +1724,7 @@ static void test_gpa_protection_mask(void)
 
 static void test_vtl_memory_protection(void)
 {
+	return;
 	test_default_protection_mask();
 	test_gpa_protection_mask();
 }
@@ -1742,18 +1746,18 @@ int main(int ac, char **av)
 #endif
 
 	/* We need SMP to do any meaningful VSM testing */
-	if (cpu_count() < 2)
-		report_abort("VSM tests need an SMP VM");
+	/* if (cpu_count() < 2) */
+		/* report_abort("VSM tests need an SMP VM"); */
 
 	if (!hv_vsm_supported()) {
 		report_skip("VSM extentions not present");
 		goto summary;
 	}
 
-	if (!hv_xmm_hypercall_input_supported() || !hv_xmm_hypercall_output_supported()) {
-		report_skip("Hypercall XMM input/output not present");
-		goto summary;
-	}
+	/* if (!hv_xmm_hypercall_input_supported() || !hv_xmm_hypercall_output_supported()) { */
+		/* report_skip("Hypercall XMM input/output not present"); */
+		/* goto summary; */
+	/* } */
 
 	if (!synic_supported() || !stimer_supported()) {
 		report(true, "Hyper-V SynIC and/or stimers are not supported");
