@@ -1682,7 +1682,7 @@ static void test_gpa_protection_mask(void)
 				.cpl = 0,
 				.cr0_pe = read_cr0() & X86_CR0_PE,
 				.cr0_am = read_cr0() & X86_CR0_AM,
-				.efer_lma = rdmsr(MSR_EFER) & EFER_LMA,
+				.efer_lma = !!(rdmsr(MSR_EFER) & EFER_LMA),
 				.debug_active = 0,
 				.interruption_pending = 0,
 			},
