@@ -1542,6 +1542,66 @@ static void test_default_protection_mask(void)
 static atomic_t g_intercepts_seen;
 static struct hv_memory_intercept_message g_last_intercept_msg;
 
+static __attribute__((unused)) void
+print_intercept_message(struct hv_memory_intercept_message *msg,
+                        const char *str)
+{
+	printf("%s: hv_memory_intercept_message:\n", str);
+	printf("  header.vp_index: %x\n", msg->header.vp_index);
+	printf("  header.instruction_length: %x\n", msg->header.instruction_length);
+	printf("  header.access_type_mask: %x\n", msg->header.access_type_mask);
+	printf("  header.exec_state.cpl: %x\n", msg->header.exec_state.cpl);
+	printf("  header.exec_state.cr0_pe: %x\n", msg->header.exec_state.cr0_pe);
+	printf("  header.exec_state.cr0_am: %x\n", msg->header.exec_state.cr0_am);
+	printf("  header.exec_state.efer_lma: %x\n", msg->header.exec_state.efer_lma);
+	printf("  header.exec_state.debug_active: %x\n",
+		 msg->header.exec_state.debug_active);
+	printf("  header.exec_state.interruption_pending: %x\n",
+		 msg->header.exec_state.interruption_pending);
+	printf("  header.cs: (values for cs segment register)\n");
+	printf("    base: %llx\n", (unsigned long long)msg->header.cs.base);
+	printf("    limit: %x\n", msg->header.cs.limit);
+	printf("    selector: %x\n", msg->header.cs.selector);
+	printf("  header.rip: %llx\n", (unsigned long long)msg->header.rip);
+	printf("  header.rflags: %llx\n", (unsigned long long)msg->header.rflags);
+	printf("  cache_type: %x\n", msg->cache_type);
+	printf("  instruction_byte_count: %x\n", msg->instruction_byte_count);
+	printf("  memory_access_info.gva_valid: %x\n",
+		 msg->memory_access_info.gva_valid);
+	printf("  _reserved: %x\n", msg->_reserved);
+	printf("  gva: %llx\n", (unsigned long long)msg->gva);
+	printf("  gpa: %llx\n", (unsigned long long)msg->gpa);
+	printf("  instruction_bytes: ");
+	for (int i = 0; i < 16; i++) {
+		printf("%02x ", msg->instruction_bytes[i]);
+	}
+	printf("\n");
+	printf("  ds: (values for ds segment register)\n");
+	printf("    base: %llx\n", (unsigned long long)msg->ds.base);
+	printf("    limit: %x\n", msg->ds.limit);
+	printf("    selector: %x\n", msg->ds.selector);
+	printf("  ss: (values for ss segment register)\n");
+	printf("    base: %llx\n", (unsigned long long)msg->ss.base);
+	printf("    limit: %x\n", msg->ss.limit);
+	printf("    selector: %x\n", msg->ss.selector);
+	printf("  rax: %llx\n", (unsigned long long)msg->rax);
+	printf("  rcx: %llx\n", (unsigned long long)msg->rcx);
+	printf("  rdx: %llx\n", (unsigned long long)msg->rdx);
+	printf("  rbx: %llx\n", (unsigned long long)msg->rbx);
+	printf("  rsp: %llx\n", (unsigned long long)msg->rsp);
+	printf("  rbp: %llx\n", (unsigned long long)msg->rbp);
+	printf("  rsi: %llx\n", (unsigned long long)msg->rsi);
+	printf("  rdi: %llx\n", (unsigned long long)msg->rdi);
+	printf("  r8: %llx\n", (unsigned long long)msg->r8);
+	printf("  r9: %llx\n", (unsigned long long)msg->r9);
+	printf("  r10: %llx\n", (unsigned long long)msg->r10);
+	printf("  r11: %llx\n", (unsigned long long)msg->r11);
+	printf("  r12: %llx\n", (unsigned long long)msg->r12);
+	printf("  r13: %llx\n", (unsigned long long)msg->r13);
+	printf("  r14: %llx\n", (unsigned long long)msg->r14);
+	printf("  r15: %llx\n", (unsigned long long)msg->r15);
+}
+
 VTL_IRQ_ENTRY(vtl_sint0_entry, vtl_sint0_handler);
 
 __attribute__((used)) static void vtl_sint0_handler(void)
