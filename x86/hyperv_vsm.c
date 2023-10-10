@@ -1820,7 +1820,6 @@ static void test_gpa_protection_mask(void)
 
 static void test_vtl_memory_protection(void)
 {
-	return;
 	test_default_protection_mask();
 	test_gpa_protection_mask();
 }
