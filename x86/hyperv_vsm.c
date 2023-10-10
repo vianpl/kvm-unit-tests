@@ -1617,7 +1617,7 @@ __attribute__((used)) static void vtl_sint0_handler(void)
 	u64 gfn = intercept->gpa >> PAGE_SHIFT;
 	res = hv_modify_vtl_protection_mask(HV_PARTITION_ID_SELF,
 					    HV_INPUT_VTL(0),
-					    HV_VTL_PROT_READ | HV_VTL_PROT_WRITE,
+					    HV_VTL_PROT_READ | HV_VTL_PROT_WRITE | HV_VTL_PROT_EXEC,
 					    1,
 					    &gfn);
 	if (res != HV_STATUS_SUCCESS)
@@ -1773,6 +1773,42 @@ static void test_gpa_protection_mask(void)
 
 	report(0 == memcmp(&expected_msg, &g_last_intercept_msg, sizeof(expected_msg)),
 	       "Seen an expected write intercept message");
+
+	/*
+	 * No execute access test
+	 */
+
+	/* Put a single ret instruction into an exec test page */
+	((uint8_t*)test_page)[0] = 0xc3;
+
+	/* Rewoke execute access to test page for VTL0 */
+	run_in_vtl1(lambda(void, (void) {
+		u64 res;
+		u64 gfn = virt_to_phys(test_page) >> PAGE_SHIFT;
+		res = hv_modify_vtl_protection_mask(HV_PARTITION_ID_SELF,
+						    HV_INPUT_VTL(0),
+						    HV_VTL_PROT_READ | HV_VTL_PROT_WRITE,
+						    1,
+						    &gfn);
+		if (res != HV_STATUS_SUCCESS)
+			report_abort("HvModifyVtlProtectionMask(0x%lx) hypercall failed with %lu\n", gfn, res);
+	}));
+
+	/* Try executing code from the page and expect an intercept message in response.
+	 * Inline assembly is required to record faulting fetch instruction address */
+	expected_msg.header.access_type_mask = HV_INTERCEPT_ACCESS_EXECUTE;
+	expected_msg.header.instruction_length = 2; /* Instruction length in this case is call %%rax, which is 2 bytes */
+	expected_msg.gpa = virt_to_phys(test_page);
+	memset(expected_msg.instruction_bytes, 0, sizeof(expected_msg.instruction_bytes));
+	expected_msg.instruction_byte_count = 0; /* No instruction decoding for exec accesses */
+	DO_ACCESS_FAULT("call %%rax");
+
+	/* RIP and RSP are not going to be what we expected after we've done a call */
+	expected_msg.header.rip = (uintptr_t)test_page;
+	expected_msg.rsp -= 8;
+
+	report(0 == memcmp(&expected_msg, &g_last_intercept_msg, sizeof(expected_msg)),
+	       "Seen an expected execute intercept message");
 
 	#undef DO_ACCESS_FAULT
 	free_page(test_page);
