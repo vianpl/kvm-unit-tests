@@ -101,6 +101,7 @@ void hyperv_hypercall(void *hypercall_page, struct hyperv_hypercall_thunk *hc)
 {
     uint64_t ctl = (uint64_t)hc->code |
                    (uint64_t)hc->fast << 16 |
+                   (uint64_t)hc->var_cnt << 17 |
                    (uint64_t)hc->rep_cnt << 32 |
                    (uint64_t)hc->rep_idx << 48;
 

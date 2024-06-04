@@ -227,8 +227,10 @@ struct hv_event_flags_page {
 
 #define HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE      0x02
 #define HVCALL_MODIFY_VTL_PROTECTION_MASK       0x0c
+#define HVCALL_SEND_IPI				0x0b
 #define HVCALL_ENABLE_PARTITION_VTL             0x0d
 #define HVCALL_ENABLE_VP_VTL                    0x0f
+#define HVCALL_SEND_IPI_EX			0x15
 #define HVCALL_GET_VP_REGISTERS                 0x50
 #define HVCALL_SET_VP_REGISTERS                 0x51
 #define HVCALL_POST_MESSAGE                     0x5c
@@ -306,6 +308,9 @@ struct hyperv_hypercall_thunk
 {
     /* Hypercall code */
     uint16_t code;
+
+    /* Variable header size */
+    uint16_t var_cnt;
 
     /* Result on return */
     uint64_t result;
@@ -645,5 +650,36 @@ union hv_register_vsm_vp_secure_vtl_config {
                 uint64_t reserved0:62;
         } __attribute__((packed));
 };
+
+
+struct hv_send_ipi {
+	uint32_t vector;
+	union hv_input_vtl in_vtl;
+	uint8_t reserved[3];
+	uint64_t cpu_mask;
+} __attribute__((packed));
+
+enum HV_GENERIC_SET_FORMAT {
+	HV_GENERIC_SET_SPARSE_4K,
+	HV_GENERIC_SET_ALL,
+};
+
+struct hv_vpset {
+	uint64_t format;
+	uint64_t valid_bank_mask;
+	uint64_t bank_contents[];
+} __attribute__((packed));
+
+/* The maximum number of sparse vCPU banks which can be encoded by 'struct hv_vpset' */
+#define HV_MAX_SPARSE_VCPU_BANKS (64)
+/* The number of vCPUs in one sparse bank */
+#define HV_VCPUS_PER_SPARSE_BANK (64)
+
+struct hv_send_ipi_ex {
+	uint32_t vector;
+	union hv_input_vtl in_vtl;
+	uint8_t reserved[3];
+	struct hv_vpset vp_set;
+} __attribute__((packed));
 
 #endif
