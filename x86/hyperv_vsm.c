@@ -1495,6 +1495,97 @@ static void test_vtl_stimers(void)
 	test_vtl_stimers_common(true);
 }
 
+static uint64_t hyperv_send_pv_ipi(uint64_t cpu_mask, uint8_t in_vtl, uint32_t vector)
+{
+	struct hv_vcpu *vcpu = vp_self();
+	struct hv_send_ipi args;
+
+        args.vector = vector;
+	args.in_vtl.as_u8 = in_vtl;
+	args.cpu_mask = cpu_mask;
+
+	struct hyperv_hypercall_thunk hc = {0};
+	hc.code = HVCALL_SEND_IPI;
+	hc.arg1 = virt_to_phys(vcpu->input_page);
+	push_input_data(vcpu->input_page, &args, sizeof(args));
+
+	do_hypercall(&hc);
+	return hc.result;
+}
+
+static uint64_t hyperv_send_pv_ipi_ex(uint64_t cpu_mask, uint8_t in_vtl, uint32_t vector)
+{
+	struct hv_send_ipi_ex *args = alloc_page();
+	struct hv_vcpu *vcpu = vp_self();
+
+        args->vector = vector;
+	args->in_vtl.as_u8 = in_vtl;
+	args->vp_set.format = 0;
+	args->vp_set.valid_bank_mask = 1ULL;
+	args->vp_set.bank_contents[0] = 1ULL;
+
+	struct hyperv_hypercall_thunk hc = {0};
+	hc.code = HVCALL_SEND_IPI_EX;
+	hc.arg1 = virt_to_phys(vcpu->input_page);
+	hc.var_cnt = 1;
+	push_input_data(vcpu->input_page, args,
+			sizeof(*args) + sizeof(args->vp_set.bank_contents[0]));
+
+	do_hypercall(&hc);
+	return hc.result;
+}
+
+static void test_hv_pv_ipi(void)
+{
+	union hv_input_vtl in_vtl = { .use_target_vtl = 0 };
+	u32 target_cpu = 0;
+
+	assert(smp_id() == 0);
+
+	/* IDTR is shared between VTLs, so we can set it globally */
+	void vtl_ipi_entry(void);
+	set_idt_entry(VTL_IPI_VECTOR, vtl_ipi_entry, 0);
+	reset_ipi_counts();
+
+	sti();
+	hyperv_send_pv_ipi(1ULL << target_cpu, in_vtl.as_u8, VTL_IPI_VECTOR);
+	wait_atomic(&g_ipi_count[0], 1);
+	report(atomic_read(&g_ipi_count[0]) == 1 && atomic_read(&g_ipi_count[1]) == 0,
+	       "VTL0 to VTL0 PV IPI");
+
+	run_in_vtl1(lambda(void, (void) {
+		hyperv_send_pv_ipi(1ULL << target_cpu, in_vtl.as_u8, VTL_IPI_VECTOR);
+		wait_atomic(&g_ipi_count[1], 1);
+		report(atomic_read(&g_ipi_count[0]) == 1 && atomic_read(&g_ipi_count[1]) == 1,
+		       "VTL1 to VTL1 PV IPI");
+	}));
+
+	in_vtl.target_vtl = 1;
+	in_vtl.use_target_vtl = 1;
+	hyperv_send_pv_ipi(1ULL << target_cpu, in_vtl.as_u8, VTL_IPI_VECTOR);
+	wait_atomic(&g_ipi_count[1], 2);
+	report(atomic_read(&g_ipi_count[0]) == 1 && atomic_read(&g_ipi_count[1]) == 2,
+	       "VTL0 to VTL1 PV IPI");
+
+	run_in_vtl1(lambda(void, (void) {
+		in_vtl.target_vtl = 0;
+		in_vtl.use_target_vtl = 1;
+		hyperv_send_pv_ipi(1ULL << target_cpu, in_vtl.as_u8, VTL_IPI_VECTOR);
+	}));
+	wait_atomic(&g_ipi_count[0], 2);
+	report(atomic_read(&g_ipi_count[0]) == 2 && atomic_read(&g_ipi_count[1]) == 2,
+	       "VTL1 to VTL0 PV IPI");
+
+	run_in_vtl1(lambda(void, (void) {
+		in_vtl.target_vtl = 0;
+		in_vtl.use_target_vtl = 1;
+		hyperv_send_pv_ipi_ex(1ULL << target_cpu, in_vtl.as_u8, VTL_IPI_VECTOR);
+	}));
+	wait_atomic(&g_ipi_count[0], 3);
+	report(atomic_read(&g_ipi_count[0]) == 3 && atomic_read(&g_ipi_count[1]) == 2,
+	       "VTL1 to VTL0 PV IPI EX");
+	cli();
+}
 
 /*
  * TLFS: A higher VTL can set a different default memory protection policy by specifying
@@ -1881,6 +1972,7 @@ int main(int ac, char **av)
 
 	test_vtl1_apic_disable();
 	test_cross_vtl_ipis();
+	test_hv_pv_ipi();
 	test_vtl_local_timer();
 	test_vtl_stimers();
 
