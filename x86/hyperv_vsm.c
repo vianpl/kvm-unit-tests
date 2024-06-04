@@ -5,6 +5,8 @@
 #include "alloc_page.h"
 #include "atomic.h"
 #include "delay.h"
+#include "alloc.h"
+#include "vmalloc.h"
 #include "hyperv.h"
 
 #define MAX_CPUS 4
@@ -1732,6 +1734,87 @@ static void get_segment(u8 sel, struct hv_x64_segment_register* seg)
 	seg->reserved = 0;
 }
 
+static int hv_translate_va(uint64_t partition_id, uint32_t vp_index,
+                           uint64_t flags, uint8_t vtl, uint64_t gva,
+                           struct hv_xlate_va_output *out)
+{
+	union hv_input_vtl in_vtl = { .target_vtl = vtl, .use_target_vtl = 1 };
+	struct hv_xlate_va_input args;
+	struct hv_vcpu* vcpu;
+
+	if (vp_index == HV_VP_INDEX_SELF)
+		vcpu = vp_self();
+	else
+		vcpu = &g_vcpus[vp_index];
+
+	args.partition_id = partition_id;
+	args.vp_index = vp_index;
+        args.control_flags = flags;
+	args.control_flags |= ((uint64_t)in_vtl.as_u8) << HV_XLATE_GVA_VTL_SHIFT;
+	args.gva = ((uint64_t)gva) >> PAGE_SHIFT;
+
+	struct hyperv_hypercall_thunk hc = {0};
+	hc.code = HVCALL_TRANSLATE_VIRTUAL_ADDRESS;
+	hc.arg1 = virt_to_phys(vcpu->input_page);
+	hc.arg2 = virt_to_phys(vcpu->output_page);
+	push_input_data(vcpu->input_page, &args, sizeof(args));
+
+	do_hypercall(&hc);
+
+	memcpy(out, vcpu->output_page, sizeof(*out));
+
+	return hc.result;
+}
+
+static void test_vtl_translate_va(void)
+{
+	void *page = malloc(PAGE_SIZE);
+	uint64_t page_gpfn = virt_to_pte_phys(phys_to_virt(read_cr3()), page) >> PAGE_SHIFT;
+	uint64_t hypercall_gpa = (uint64_t)(vtl_partition_ctx()->hypercall_page);
+	struct hv_xlate_va_output out;
+	uint64_t control_flags;
+	int res;
+
+        control_flags = HV_XLATE_GVA_VAL_READ | HV_XLATE_GVA_VAL_WRITE |
+                        HV_XLATE_GVA_VAL_EXECUTE | HV_XLATE_GVA_PRIVILEGE_EXEMPT;
+
+        res = hv_translate_va(HV_PARTITION_ID_SELF, HV_VP_INDEX_SELF,
+                              control_flags, 0, (uint64_t)page, &out);
+        report(res == HV_STATUS_SUCCESS &&
+               out.result_code == HV_XLATE_GVA_SUCCESS &&
+               out.cache_type == HV_X64_CACHE_TYPE_WRITEBACK &&
+               !out.overlay_page && out.gpa == page_gpfn,
+               "Translate GVA VTL0->VTL0");
+
+        res = hv_translate_va(HV_PARTITION_ID_SELF, HV_VP_INDEX_SELF,
+                              control_flags, 0, 0x8000000000ULL, &out);
+        report(res == HV_STATUS_SUCCESS &&
+               out.result_code == HV_XLATE_GVA_UNMAPPED,
+               "Translate GVA VTL0->VTL0 unmapped");
+
+        run_in_vtl1(lambda(void, (void) {
+		res = hv_translate_va(HV_PARTITION_ID_SELF, HV_VP_INDEX_SELF,
+				      control_flags, 0, (uint64_t)page, &out);
+                report(res == HV_STATUS_SUCCESS &&
+                       out.result_code == HV_XLATE_GVA_SUCCESS &&
+                       out.cache_type == HV_X64_CACHE_TYPE_WRITEBACK &&
+                       !out.overlay_page && out.gpa == page_gpfn,
+                       "Translate GVA VTL1->VTL0");
+
+		res = hv_translate_va(HV_PARTITION_ID_SELF, HV_VP_INDEX_SELF,
+				      control_flags, 0, hypercall_gpa, &out);
+
+                report(res == HV_STATUS_SUCCESS &&
+                       out.result_code == HV_XLATE_GVA_SUCCESS &&
+                       out.cache_type == HV_X64_CACHE_TYPE_WRITEBACK &&
+                       out.overlay_page == 1 &&
+                       out.gpa == hypercall_gpa >> PAGE_SHIFT,
+                       "Translate GVA VTL1->VTL0 overlay");
+	}));
+
+	free(page);
+}
+
 /*
  * Test explicitly set per-GPA protections.
  */
@@ -1976,6 +2059,7 @@ int main(int ac, char **av)
 	test_vtl_local_timer();
 	test_vtl_stimers();
 
+	test_vtl_translate_va();
 	test_vtl_memory_protection();
 
 summary:

@@ -233,6 +233,7 @@ struct hv_event_flags_page {
 #define HVCALL_SEND_IPI_EX			0x15
 #define HVCALL_GET_VP_REGISTERS                 0x50
 #define HVCALL_SET_VP_REGISTERS                 0x51
+#define HVCALL_TRANSLATE_VIRTUAL_ADDRESS	0x52
 #define HVCALL_POST_MESSAGE                     0x5c
 #define HVCALL_SIGNAL_EVENT                     0x5d
 
@@ -651,6 +652,36 @@ union hv_register_vsm_vp_secure_vtl_config {
         } __attribute__((packed));
 };
 
+
+#define HV_XLATE_GVA_SUCCESS 0
+#define HV_XLATE_GVA_UNMAPPED 1
+#define HV_XLATE_GPA_UNMAPPED 4
+#define HV_CACHE_TYPE_X64_WB 6
+
+#define HV_XLATE_GVA_VAL_READ               (1 << 0)
+#define HV_XLATE_GVA_VAL_WRITE              (1 << 1)
+#define HV_XLATE_GVA_VAL_EXECUTE            (1 << 2)
+#define HV_XLATE_GVA_PRIVILEGE_EXEMPT       (1 << 3)
+#define HV_XLATE_GVA_SET_PAGE_TABLE_BITS    (1 << 4)
+#define HV_XLATE_GVA_TLB_FLUSH_INHIBIT      (1 << 5)
+#define HV_XLATE_GVA_FLAGS_MASK 0x3F
+#define HV_XLATE_GVA_VTL_SHIFT 56
+
+struct hv_xlate_va_input {
+	uint64_t partition_id;
+	uint32_t vp_index;
+	uint32_t reserved;
+	uint64_t control_flags;
+	uint64_t gva;
+} __attribute__((packed));
+
+struct hv_xlate_va_output {
+	uint32_t result_code;
+	uint32_t cache_type:8;
+	uint32_t overlay_page:1;
+	uint32_t reserved:23;
+	uint64_t gpa;
+} __attribute__((packed));
 
 struct hv_send_ipi {
 	uint32_t vector;
