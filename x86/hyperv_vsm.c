@@ -1724,8 +1724,18 @@ __attribute__((used)) static void vtl_sint0_handler(void)
 	apic_write(APIC_EOI, 0);
 }
 
-static void get_segment(u8 sel, struct hv_x64_segment_register* seg)
+/*
+ * Gets a struct hv_x64_segment_register* as the argument. Setup as such to
+ * avoid:
+ *
+ *  error: taking address of packed member of ‘struct
+ *  hv_memory_intercept_message’ may result in an unaligned pointer value
+ *  [-Werror=address-of-packed-member]
+ */
+static void get_segment(u8 sel, void *arg)
 {
+	struct hv_x64_segment_register* seg = arg;
+
 	gdt_entry_t* entry = &gdt[sel / sizeof(*entry)];
 	seg->base = get_gdt_entry_base(entry);
 	seg->limit = get_gdt_entry_limit(entry);
